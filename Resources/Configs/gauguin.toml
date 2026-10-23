@@ -13,11 +13,11 @@ model_count = 1
 # never reads one.
 #
 [boot_shim]
-requires_kernel_header = false
+requires_kernel_header = true
 # Boot-stage reporter for bring-up: paints the framebuffer red on entry and
 # green before jumping into the volume, so a screen that never changes colour
 # means the image was never executed.
-probe = true
+probe = false
 
 #
 # UEFI FD Configs

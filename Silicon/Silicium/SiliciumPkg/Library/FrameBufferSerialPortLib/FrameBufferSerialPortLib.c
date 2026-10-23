@@ -238,6 +238,95 @@ GetFrameBufferMemory (
   return EFI_SUCCESS;
 }
 
+//
+// P2 diagnostic log sink.
+//
+// The platform maps SerialPortLib to this library, so every DEBUG() in the
+// firmware is drawn into the framebuffer and nowhere else. That is fine under
+// QEMU, whose console *is* the framebuffer, and useless on the phone: a remote
+// host cannot read a screen and a reset destroys it, which is why no device run
+// of this payload has ever left a record of why it stopped.
+//
+// This appends the same bytes to a ring buffer in the reserved "DBI Dump"
+// region, near its high end. Layout: three u32 of header (magic, next-write
+// offset, wrap count) then the ring. Read it back with `pmemsave` at the
+// mirror, or from a bootloader/TWRP that can reach physical RAM, and the last
+// boot's log is there.
+//
+// Why DBI Dump and not the first address that was tried: the sink was originally
+// placed at 0xA9C00000, 124 MB into the "Kernel" region, on the reasoning that
+// nothing writes there after the firmware stops. That reasoning is wrong for the
+// case the sink exists to serve. Reaching RAM on a phone that will not boot means
+// rebooting into TWRP, and TWRP loads the Android kernel into exactly that region
+// before the log can be read - so the first version would have been destroyed by
+// the act of going to look at it. "DBI Dump" (0xAFAA0000 + 0x01400000) is
+// declared `RtData` in this platform's own MemoryMapLib, which keeps it out of
+// the firmware heap, and 0xAFBFC000 sits above the "Kernel" region TWRP loads
+// into. That is the whole of what this address buys.
+//
+// It is NOT established that the bytes survive the round trip, and two earlier
+// drafts of this comment claimed more than that:
+//   - "preserved through ResetToUefi" named a mechanism that appears nowhere in
+//     this tree. `RtData` is a mark handed to the HOB; nothing here reads it,
+//     and nothing here says XBL leaves "DBI Dump" alone. The region is XBL's own
+//     ramdump area, so it may equally well be re-initialised on the way back in.
+//   - "the top of DRAM" is false. The device's own DT `memory` node has three
+//     banks and the top is 0x280000000; 0xAFBFC000 is ~256 MB under the end of
+//     the *first* bank. The high end of DBI Dump was picked so that a cold power
+//     cycle has the least chance of a carve-out re-allocating the header, and
+//     that is a guess, not a property.
+// The warm-reset arm cannot be tested at all here: the recovery route the sink
+// exists to serve is Power+VolumeUp from fully off. If a real read comes back
+// with the wrong magic, suspect this before suspecting the image.
+//
+// Size and address are deliberately compile-time: SEC and PEI write here before
+// any memory-region lookup works, and a sink that only starts working in DXE
+// would miss exactly the failures worth reading.
+//
+#define P2_LOG_SINK_BASE  0xAFBFC000ULL
+#define P2_LOG_SINK_SIZE  0x00010000
+#define P2_LOG_MAGIC      0x474C3250u  // "P2LG"
+
+STATIC
+VOID
+P2LogSink (
+  IN CONST UINT8 *Buffer,
+  IN UINTN        NumberOfBytes)
+{
+  UINT32 *Header;
+  UINT8  *Ring;
+  UINTN   RingSize;
+  UINT32  Offset;
+
+  if (NumberOfBytes == 0) {
+    return;
+  }
+
+  Header   = (UINT32 *)P2_LOG_SINK_BASE;
+  Ring     = (UINT8 *)(P2_LOG_SINK_BASE + 16);
+  RingSize = P2_LOG_SINK_SIZE - 16;
+
+  // Initialise the header on the first write of a power cycle. The magic is the
+  // test, so stale RAM is overwritten rather than mistaken for a log.
+  if (Header[0] != P2_LOG_MAGIC) {
+    Header[0] = P2_LOG_MAGIC;
+    Header[1] = 0;
+    Header[2] = 0;
+    Header[3] = P2_LOG_SINK_SIZE;
+  }
+
+  Offset = Header[1];
+  for (UINTN i = 0; i < NumberOfBytes; i++) {
+    Ring[Offset] = Buffer[i];
+    Offset = (Offset + 1) % RingSize;
+  }
+
+  Header[1] = Offset;
+  Header[2]++;
+
+  WriteBackInvalidateDataCacheRange ((VOID *)P2_LOG_SINK_BASE, P2_LOG_SINK_SIZE);
+}
+
 UINTN
 EFIAPI
 SerialPortWrite (
@@ -248,10 +337,15 @@ SerialPortWrite (
   EFI_PHYSICAL_ADDRESS FbBase;
   UINT64               FbLength;
 
+  // Mirror the stream into memory first: this path must not depend on the
+  // framebuffer being locatable, because a payload that dies early is exactly
+  // the one whose log is wanted.
+  P2LogSink (Buffer, NumberOfBytes);
+
   // Get Frame Buffer Memory
   Status = GetFrameBufferMemory (&FbBase, &FbLength);
   if (EFI_ERROR (Status)) {
-    return 0;
+    return NumberOfBytes;
   }
 
   // Get Interrupts State

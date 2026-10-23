@@ -130,6 +130,7 @@
   INF Binaries/gauguin/QcomPkg/Drivers/RNGDxe/RngDxe.inf
 
   INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
+  INF Binaries/gauguin/QcomPkg/Drivers/QcomBds/QcomBds.inf
 
   # INF Binaries/gauguin/QcomPkg/Drivers/PILDxe/PILDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/ShmBridgeDxe/ShmBridgeDxeLA.inf
