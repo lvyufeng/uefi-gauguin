@@ -8,7 +8,7 @@ model_count = 1
 # Boot Shim Configs
 #
 [boot_shim]
-requires_kernel_header = true
+requires_kernel_header = false
 
 #
 # UEFI FD Configs
