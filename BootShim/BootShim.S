@@ -1,3 +1,26 @@
+/*
+ * Android boot shim: move the appended UEFI firmware volume to its link address
+ * and jump to it.
+ *
+ * The bootloader loads the kernel (this shim plus the volume) at the address
+ * the boot image names, which is not where the volume was built to live, so
+ * the first thing this code does is copy the volume into place.
+ *
+ * BAO_PROBE=1 turns the shim into a boot-stage reporter. A retail phone has no
+ * serial console, so each stage paints the framebuffer a solid colour before
+ * running the next one. The framebuffer is whatever the bootloader left on
+ * screen (the splash region from the device tree), written as pixels:
+ *
+ *   red    shim entered
+ *   green  volume copied, about to jump into it
+ *
+ * No colour at all means the bootloader never reached the shim.
+ */
+  .equ PROBE_COLOUR_ENTER, 0x00ff0000
+  .equ PROBE_COLOUR_JUMP,  0x0000ff00
+  .equ PROBE_FB_BASE,      0xa0000000     /* cont_splash_region (device tree) */
+  .equ PROBE_PIXELS,       0x00280000     /* 1080*2400 pixels, rounded up */
+
 _Head:
   adr   x1, _Payload    /* Set _Entry address */
   b     _Start          /* Jump to the real code */
@@ -18,6 +41,10 @@ _StackSize:
 
 _Start:
   mov   x4, x1
+#if BAO_PROBE == 1
+  ldr   x7, =PROBE_COLOUR_ENTER
+  bl    _Paint
+#endif
   ldr   x5, =FD_BASE
   cmp   x4, x5
   beq   _Entry
@@ -31,10 +58,25 @@ _CopyLoop:
   ldr   x5, =FD_BASE
 
 _Entry:
+#if BAO_PROBE == 1
+  ldr   x7, =PROBE_COLOUR_JUMP
+  bl    _Paint
+#endif
   br    x5
 
 _Dead:
   b     _Dead
+
+#if BAO_PROBE == 1
+_Paint:
+  ldr   x8, =PROBE_FB_BASE
+  ldr   x9, =PROBE_PIXELS
+1:
+  str   w7, [x8], #4
+  subs  x9, x9, #1
+  b.ne  1b
+  ret
+#endif
 
 .text
 .align 4

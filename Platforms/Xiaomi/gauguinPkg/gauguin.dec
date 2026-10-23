@@ -1,0 +1,10 @@
+##
+#  Xiaomi Redmi Note 9 Pro 5G (gauguin)
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  DEC_SPECIFICATION = 0x00010005
+  PACKAGE_NAME      = gauguinPkg
+  PACKAGE_GUID      = 7E1B4C62-2F4A-4D18-9E31-2C5A0D8B6F42
+  PACKAGE_VERSION   = 0.1

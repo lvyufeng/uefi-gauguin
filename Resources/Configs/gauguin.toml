@@ -7,31 +7,51 @@ model_count = 1
 #
 # Boot Shim Configs
 #
+# The volume is linked to run at 0x9FC00000, which is not where the bootloader
+# puts the kernel, so the shim copies it there first. The AArch64 image header
+# is not written: a Qualcomm ABL takes the entry point from the boot image and
+# never reads one.
+#
 [boot_shim]
 requires_kernel_header = false
+# Boot-stage reporter for bring-up: paints the framebuffer red on entry and
+# green before jumping into the volume, so a screen that never changes colour
+# means the image was never executed.
+probe = true
 
 #
 # UEFI FD Configs
 #
-# Taken from miatoll, the other SM7125 board in Mu-Silicium: the same ABL loads
-# the boot image at 0x80000000, and the same top-of-window layout applies. The
-# range is a hole in the gauguin device tree's reserved-memory map read off the
-# phone (PIL ends at 0x97800000, the splash pool starts at 0xa0000000), so
-# nothing else claims it.
+# The "UEFI FD" region of the board's own uefiplat.cfg: the stock firmware
+# volume is linked to run here, so a replacement has to match it. 0x9FC00000 +
+# 3 MiB ends at 0x9FF00000, below the SEC heap and the UEFI stack.
 #
 [uefi_fd]
-base = 0x9FD00000
-size = 0x200000
+base = 0x9FC00000
+size = 0x300000
 
 #
 # Android Boot Image Kernel Configs
 #
+# append_dtb is off: at header version 2 the device tree is a region of its own
+# declared in the header, and gluing it onto the kernel blob instead leaves
+# dtb_size 0 and the region empty, so ABL's GetSocDtb() returns NULL.
+#
 [boot_image_kernel]
 kernel_compression = "gzip"
-append_dtb         = true
+append_dtb         = false
 
 #
 # Android Boot Image Configs
 #
+# Field for field what the phone's own boot partition declares: header version
+# 2, 0x1000 pages, kernel at 0x8000, ramdisk at 0x1000000, tags at 0x100 and the
+# device tree at 0x1F00000.
+#
 [boot_image]
-header_version = 1
+header_version = 2
+base = 0x0
+kernel_offset = 0x8000
+ramdisk_offset = 0x1000000
+tags_offset = 0x100
+pagesize = 0x1000

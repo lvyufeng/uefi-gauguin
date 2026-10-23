@@ -1,8 +1,2 @@
-Build/
-Conf/
-Binaries/
-*.pyc
-__pycache__/
-# Qualcomm DXE binaries are extracted from device firmware and are not tracked.
 Binaries/
 edk2/
