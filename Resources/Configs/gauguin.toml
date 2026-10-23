@@ -1,0 +1,37 @@
+#
+# Device Status
+#
+[status]
+model_count = 1
+
+#
+# Boot Shim Configs
+#
+[boot_shim]
+requires_kernel_header = true
+
+#
+# UEFI FD Configs
+#
+# Taken from miatoll, the other SM7125 board in Mu-Silicium: the same ABL loads
+# the boot image at 0x80000000, and the same top-of-window layout applies. The
+# range is a hole in the gauguin device tree's reserved-memory map read off the
+# phone (PIL ends at 0x97800000, the splash pool starts at 0xa0000000), so
+# nothing else claims it.
+#
+[uefi_fd]
+base = 0x9FD00000
+size = 0x200000
+
+#
+# Android Boot Image Kernel Configs
+#
+[boot_image_kernel]
+kernel_compression = "gzip"
+append_dtb         = true
+
+#
+# Android Boot Image Configs
+#
+[boot_image]
+header_version = 1

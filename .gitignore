@@ -1,0 +1,5 @@
+Build/
+Conf/
+Binaries/
+*.pyc
+__pycache__/
