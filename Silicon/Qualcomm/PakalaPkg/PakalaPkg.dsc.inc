@@ -1,0 +1,79 @@
+##
+#  Copyright (c) 2011 - 2022, ARM Limited. All rights reserved.
+#  Copyright (c) 2014, Linaro Limited. All rights reserved.
+#  Copyright (c) 2015 - 2020, Intel Corporation. All rights reserved.
+#  Copyright (c) 2018, Bingxing Wang. All rights reserved.
+#  Copyright (c) Microsoft Corporation.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  #
+  # Timer
+  #
+  USE_PHYSICAL_TIMER                         = 0
+
+  #
+  # KEP
+  #
+  HAS_ACTLR_EL1_UNIMPLEMENTED_ERRATA         = 0
+  HAS_AMCNTENSET0_EL0_UNIMPLEMENTED_ERRATA   = 0
+  HAS_GIC_V3_WITHOUT_IRM_FLAG_SUPPORT_ERRATA = 0
+  HAS_PSCI_MEMPROTECT_FAILING_ERRATA         = 0
+
+!include QcomPkg/QcomPkg.dsc.inc
+
+[BuildOptions]
+  # ARM Version Incorrect?
+  *_*_AARCH64_CC_FLAGS = -march=armv8-a+crypto+rcpc -DSOC_TYPE=$(SOC_TYPE)
+
+[PcdsFixedAtBuild]
+  #
+  # ACPI
+  #
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemTableId|0x2020414C414B4150
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemRevision|0x8750
+
+  #
+  # CPU
+  #
+!if $(SOC_TYPE) == 1
+  gArmPlatformTokenSpaceGuid.PcdCoreCount|7
+!else
+  gArmPlatformTokenSpaceGuid.PcdCoreCount|8
+!endif
+  gArmPlatformTokenSpaceGuid.PcdClusterCount|2
+
+  #
+  # GIC
+  #
+  gArmTokenSpaceGuid.PcdGicDistributorBase|0x16000000
+  gArmTokenSpaceGuid.PcdGicRedistributorsBase|0x16080000
+
+  #
+  # SMBIOS
+  #
+!if ($(SOC_TYPE) == 0 || $(SOC_TYPE) == 1)
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorModel|"Snapdragon (TM) 8 Elite @ 4.32 GHz"
+!if $(SOC_TYPE) == 0
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8750-AB"
+!elseif $(SOC_TYPE) == 1
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8750-3-AB"
+!endif
+!elseif $(SOC_TYPE) == 2
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorModel|"Snapdragon (TM) 8 Elite @ 4.47 GHz"
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8750-AC"
+!endif
+
+[LibraryClasses]
+  #
+  # SEC Libraries
+  #
+  PlatformSecLib|PakalaPkg/Library/PlatformSecLib/PlatformSecLib.inf
+
+[Components]
+  #
+  # Custom Drivers
+  #
+  QcomPkg/Drivers/IortDtDxe/IortDtDxe.inf

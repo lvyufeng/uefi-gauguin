@@ -1,0 +1,77 @@
+##
+#  Copyright (c) 2011 - 2022, ARM Limited. All rights reserved.
+#  Copyright (c) 2014, Linaro Limited. All rights reserved.
+#  Copyright (c) 2015 - 2020, Intel Corporation. All rights reserved.
+#  Copyright (c) 2018, Bingxing Wang. All rights reserved.
+#  Copyright (c) Microsoft Corporation.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  #
+  # Timer
+  #
+  USE_PHYSICAL_TIMER                         = 0
+
+  #
+  # KEP
+  #
+  HAS_ACTLR_EL1_UNIMPLEMENTED_ERRATA         = 1
+  HAS_AMCNTENSET0_EL0_UNIMPLEMENTED_ERRATA   = 1
+  HAS_GIC_V3_WITHOUT_IRM_FLAG_SUPPORT_ERRATA = 1
+  HAS_PSCI_MEMPROTECT_FAILING_ERRATA         = 0
+
+!include QcomPkg/QcomPkg.dsc.inc
+
+[BuildOptions]
+  *_*_AARCH64_CC_FLAGS = -march=armv9.2-a+crypto+rcpc
+
+[PcdsFixedAtBuild]
+  #
+  # ACPI
+  #
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemTableId|0x204E4157414C4150
+!if $(SOC_TYPE) == 0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemRevision|0x8635
+!elseif $(SOC_TYPE) == 1
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemRevision|0x7675
+!endif
+
+  #
+  # CPU
+  #
+  gArmPlatformTokenSpaceGuid.PcdCoreCount|8
+  gArmPlatformTokenSpaceGuid.PcdClusterCount|3
+
+  #
+  # GIC
+  #
+  gArmTokenSpaceGuid.PcdGicDistributorBase|0x17100000
+  gArmTokenSpaceGuid.PcdGicRedistributorsBase|0x17180000
+
+  #
+  # SMBIOS
+  #
+!if $(SOC_TYPE) == 0
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorModel|"Snapdragon (TM) 8s Gen 3 @ 3.00 GHz"
+!elseif $(SOC_TYPE) == 1
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorModel|"Snapdragon (TM) 7+ Gen 3 @ 2.80 GHz"
+!endif
+!if $(SOC_TYPE) == 0
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8635"
+!elseif $(SOC_TYPE) == 1
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM7675"
+!endif
+
+[LibraryClasses]
+  #
+  # SEC Libraries
+  #
+  PlatformSecLib|PalawanPkg/Library/PlatformSecLib/PlatformSecLib.inf
+
+[Components]
+  #
+  # Custom Drivers
+  #
+  QcomPkg/Drivers/IortDtDxe/IortDtDxe.inf

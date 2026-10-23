@@ -1,0 +1,23 @@
+[submodule "Binaries"]
+	path = Binaries
+	url = https://github.com/Project-Silicium/Device-Binaries.git
+	ignore = untracked
+[submodule "Common/Mu"]
+	path = Common/Mu
+	url = https://github.com/microsoft/mu_plus.git
+	branch = release/202608
+[submodule "Common/Mu_OEM_Sample"]
+	path = Common/Mu_OEM_Sample
+	url = https://github.com/microsoft/mu_oem_sample.git
+	branch = release/202608
+[submodule "Mu_Basecore"]
+	path = Mu_Basecore
+	url = https://github.com/microsoft/mu_basecore.git
+	branch = release/202608
+[submodule "Silicium-ACPI"]
+	path = Silicium-ACPI
+	url = https://github.com/Project-Silicium/Silicium-ACPI.git
+[submodule "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
+	path = Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl
+	url = https://github.com/openssl/openssl.git
+	branch = 67b5686b4419b4cb8caa502711c41815f5279751

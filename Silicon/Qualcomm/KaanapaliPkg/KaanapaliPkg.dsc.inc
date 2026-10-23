@@ -1,0 +1,78 @@
+##
+#  Copyright (c) 2011 - 2022, ARM Limited. All rights reserved.
+#  Copyright (c) 2014, Linaro Limited. All rights reserved.
+#  Copyright (c) 2015 - 2020, Intel Corporation. All rights reserved.
+#  Copyright (c) 2018, Bingxing Wang. All rights reserved.
+#  Copyright (c) Microsoft Corporation.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  #
+  # Timer
+  #
+  USE_PHYSICAL_TIMER                         = 0
+
+  #
+  # KEP
+  #
+  HAS_ACTLR_EL1_UNIMPLEMENTED_ERRATA         = 0
+  HAS_AMCNTENSET0_EL0_UNIMPLEMENTED_ERRATA   = 0
+  HAS_GIC_V3_WITHOUT_IRM_FLAG_SUPPORT_ERRATA = 0
+  HAS_PSCI_MEMPROTECT_FAILING_ERRATA         = 0
+
+!include QcomPkg/QcomPkg.dsc.inc
+
+[BuildOptions]
+  *_*_AARCH64_CC_FLAGS = -march=armv9.2-a+crypto+rcpc -DSOC_TYPE=$(SOC_TYPE)
+
+[PcdsFixedAtBuild]
+  #
+  # ACPI
+  #
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemTableId|0x4C4150414E41414B
+  gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultOemRevision|0x8850
+
+  #
+  # CPU
+  #
+!if $(SOC_TYPE) != 1
+  gArmPlatformTokenSpaceGuid.PcdCoreCount|8
+!else
+  gArmPlatformTokenSpaceGuid.PcdCoreCount|7
+!endif
+  gArmPlatformTokenSpaceGuid.PcdClusterCount|2
+
+  #
+  # GIC
+  #
+  gArmTokenSpaceGuid.PcdGicDistributorBase|0x17000000
+  gArmTokenSpaceGuid.PcdGicRedistributorsBase|0x17080000
+
+  #
+  # SMBIOS
+  #
+!if $(SOC_TYPE) != 2
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorModel|"Snapdragon (TM) 8 Elite Gen 5 @ 4.74 GHz"
+!if $(SOC_TYPE) == 0
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8850-AC"
+!elseif $(SOC_TYPE) == 1
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8850-5-AC"
+!endif
+!else
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorModel|"Snapdragon (TM) 8 Elite Gen 5 @ 4.60 GHz"
+  gSiliciumPkgTokenSpaceGuid.PcdSmbiosProcessorPartNumber|"SM8850-1-AD"
+!endif
+
+[LibraryClasses]
+  #
+  # SEC Libraries
+  #
+  PlatformSecLib|KaanapaliPkg/Library/PlatformSecLib/PlatformSecLib.inf
+
+[Components]
+  #
+  # Custom Drivers
+  #
+  QcomPkg/Drivers/IortDtDxe/IortDtDxe.inf
