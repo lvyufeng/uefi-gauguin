@@ -5,7 +5,7 @@
 #include <Library/MemoryMapLib.h>
 
 /*
- * Memory map of the Xiaomi Redmi Note 9 Pro 5G (gauguin, SM7125 lagoon).
+ * Memory map of the Xiaomi Redmi Note 9 Pro 5G (gauguin, SM7225 Snapdragon 750G).
  *
  * Every reservation below is a /reserved-memory node read from this phone's own
  * device tree, and the firmware window is the one the vendor map used, so the

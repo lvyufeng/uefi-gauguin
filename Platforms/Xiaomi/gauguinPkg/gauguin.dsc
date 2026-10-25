@@ -1,5 +1,5 @@
 ##
-#  Xiaomi Redmi Note 9 Pro 5G / Mi 10T Lite (gauguin, SM7125 lagoon)
+#  Xiaomi Redmi Note 9 Pro 5G / Mi 10T Lite (gauguin, SM7225 Snapdragon 750G)
 #
 #  A Mu-only platform, built the way uefi-tb128fu is built.
 #
