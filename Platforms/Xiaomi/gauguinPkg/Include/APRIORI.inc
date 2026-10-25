@@ -57,6 +57,20 @@ APRIORI DXE {
   INF Binaries/gauguin/QcomPkg/Drivers/TzDxe/ScmDxeLA.inf
 
   INF MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf
+
+  #
+  # The ramdisk must be published before Fat is dispatched, and nothing else says so.
+  #
+  # ShengBootMemoryDxe has a TRUE depex, which means it runs whenever the dispatcher gets to
+  # it - after this batch, in practice. Fat has no depex either, so it ran first, found no
+  # block device to mount, and returned having done nothing; the ramdisk then appeared with
+  # no filesystem driver left to attach to it. The menu said "no boot entry found" because
+  # UniXNU enumerates EFI_SIMPLE_FILE_SYSTEM_PROTOCOL handles and there were none to find.
+  #
+  # Putting the publisher ahead of the mount point is the whole fix: partition discovery and
+  # Fat then see the ramdisk as an ordinary disk.
+  #
+  INF gauguinPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
   INF MdeModulePkg/Universal/Disk/PartitionDxe/PartitionDxe.inf
   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
 
@@ -67,10 +81,13 @@ APRIORI DXE {
   # ShengBootMemoryDxe publishes from /chosen in the device tree.
   # INF Binaries/gauguin/QcomPkg/Drivers/UFSDxe/UFSDxe.inf
 
-  # Fat is out of the batch for one run: CoreLoadImage hangs inside it (see the "loading
-  # 961578FE ... " line and the silence after it), and the boot manager does not need a
-  # filesystem for the payload - it arrives in a ramdisk that ShengBootMemoryDxe publishes.
-  # INF FatPkg/EnhancedFatDxe/Fat.inf
+  # Fat is back in the batch. It was taken out when CoreLoadImage hung inside it, but the
+  # reason given for leaving it out was wrong: UniXNU does not read the payload out of a raw
+  # ramdisk. It looks for EFI_SIMPLE_FILE_SYSTEM_PROTOCOL on every handle and reads
+  # unixnu.toml from it, so a block device with no filesystem driver above it is a payload
+  # UniXNU cannot see at all - which is exactly what happened, and why the menu kept falling
+  # back to its built-in configuration with "Return to Firmware" first.
+  INF FatPkg/EnhancedFatDxe/Fat.inf
 
   # TzDxe is out for one run: GetFileBufferByFilePath never returns while reading its image
   # out of the volume, and the next driver in the batch tells us whether that is TzDxe

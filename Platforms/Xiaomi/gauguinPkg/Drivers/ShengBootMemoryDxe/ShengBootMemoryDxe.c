@@ -23,6 +23,8 @@
 #include <Library/DxeServicesTableLib.h>
 #include <Library/FdtLib.h>
 #include <Library/HobLib.h>
+#include <Library/BootScreenLib.h>
+#include <Library/LogBufferLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/BlockIo.h>
@@ -378,41 +380,27 @@ STATIC EFI_BLOCK_IO_PROTOCOL  mBlockIo = {
   RamBlockFlush
 };
 
+/**
+  Publish a RAM range as the read-only block device UniXNU reads its payload from.
+
+  Shared by both callers: the /chosen node of a device tree, and the boot image header. The
+  second exists because the first cannot work here - see ShengBootMemoryDxeEntry.
+
+  @param[in]  Start  First byte of the ramdisk.
+  @param[in]  End    One past the last byte.
+**/
 STATIC
 VOID
-PublishInitrd (
-  IN CONST VOID  *Fdt
+PublishRamdisk (
+  IN UINT64  Start,
+  IN UINT64  End
   )
 {
   EFI_STATUS  Status;
-  INT32       Chosen;
-  CONST VOID  *StartProp;
-  CONST VOID  *EndProp;
-  INT32       StartLength;
-  INT32       EndLength;
-  UINT64      Start;
-  UINT64      End;
   EFI_HANDLE  Handle;
 
-  Chosen = FdtPathOffset (Fdt, "/chosen");
-  if (Chosen < 0) {
-    DEBUG ((DEBUG_ERROR, "SHENGMEM: no /chosen\n"));
-    return;
-  }
-
-  StartProp = FdtGetProp (Fdt, Chosen, "linux,initrd-start", &StartLength);
-  EndProp   = FdtGetProp (Fdt, Chosen, "linux,initrd-end", &EndLength);
-  if ((StartProp == NULL) || (EndProp == NULL) ||
-      ((StartLength != 4) && (StartLength != 8)) || ((EndLength != 4) && (EndLength != 8)))
-  {
-    DEBUG ((DEBUG_ERROR, "SHENGMEM: no initrd in /chosen\n"));
-    return;
-  }
-
-  Start = ReadCells (StartProp, StartLength / 4);
-  End   = ReadCells (EndProp, EndLength / 4);
   if ((End <= Start) || (((End - Start) % RAM_BLOCK_SIZE) != 0)) {
-    DEBUG ((DEBUG_ERROR, "SHENGMEM: initrd 0x%lx-0x%lx is not a whole number of sectors\n", Start, End));
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: ramdisk 0x%lx-0x%lx is not a whole number of sectors\n", Start, End));
     return;
   }
 
@@ -436,7 +424,46 @@ PublishInitrd (
                   &mBlockIo,
                   NULL
                   );
-  DEBUG ((DEBUG_ERROR, "SHENGMEM: initrd block device 0x%lx size 0x%lx %r\n", Start, End - Start, Status));
+  DEBUG ((DEBUG_ERROR, "SHENGMEM: ramdisk block device 0x%lx size 0x%lx %r\n", Start, End - Start, Status));
+}
+
+STATIC
+VOID
+PublishInitrd (
+  IN CONST VOID  *Fdt
+  )
+{
+  INT32       Chosen;
+  CONST VOID  *StartProp;
+  CONST VOID  *EndProp;
+  INT32       StartLength;
+  INT32       EndLength;
+  UINT64      Start;
+  UINT64      End;
+
+  Chosen = FdtPathOffset (Fdt, "/chosen");
+  if (Chosen < 0) {
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: no /chosen\n"));
+    return;
+  }
+
+  StartProp = FdtGetProp (Fdt, Chosen, "linux,initrd-start", &StartLength);
+  EndProp   = FdtGetProp (Fdt, Chosen, "linux,initrd-end", &EndLength);
+  if ((StartProp == NULL) || (EndProp == NULL) ||
+      ((StartLength != 4) && (StartLength != 8)) || ((EndLength != 4) && (EndLength != 8)))
+  {
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: no initrd in /chosen\n"));
+    return;
+  }
+
+  Start = ReadCells (StartProp, StartLength / 4);
+  End   = ReadCells (EndProp, EndLength / 4);
+  if ((End <= Start) || (((End - Start) % RAM_BLOCK_SIZE) != 0)) {
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: initrd 0x%lx-0x%lx is not a whole number of sectors\n", Start, End));
+    return;
+  }
+
+  PublishRamdisk (Start, End);
 }
 
 /**
@@ -516,10 +543,100 @@ ShengBootMemoryDxeEntry (
   Hob = GetFirstGuidHob (&gSiliciumEntryArgHobGuid);
   if (Hob == NULL) {
     DEBUG ((DEBUG_ERROR, "SHENGMEM: no entry argument HOB\n"));
+    LogBufferWriteString ("SHENGMEM: no entry argument HOB\n");
+    BootScreenEvent (90, 0x1111, 0, BootScreenKindDone);
     return EFI_SUCCESS;
   }
 
   Dtb = *(UINT64 *)GET_GUID_HOB_DATA (Hob);
+
+  //
+  // Publish the payload from the boot image header, not from a device tree.
+  //
+  // BootShim replaces ABL's x0 with the address it was itself loaded at, so this is the start
+  // of the boot image. Its header declares the kernel size, the ramdisk size and the page
+  // size; the ramdisk sits one page past the header plus enough pages for the kernel. Every
+  // number comes from the header the packer wrote, so nothing here is guessed.
+  //
+  // This path exists because the device tree is out of reach on this board. ABL points at
+  // 0xA59FE000 and the boot image sits at 0xA2408000; both were unreadable for the same
+  // reason - neither address had a descriptor, so the MMU never mapped it, and a read faulted
+  // instead of returning. The map now describes the first 15 MiB of that gap, which is what
+  // makes the header readable at all.
+  //
+  {
+    UINT32  *Header;
+    UINT32  KernelSize;
+    UINT32  RamdiskSize;
+    UINT32  PageSize;
+    UINT64  RamdiskStart;
+
+    Header = (UINT32 *)(UINTN)Dtb;
+
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: boot image at 0x%lx\n", Dtb));
+
+    if ((Header[0] != 0x4F444E41u) || (Header[1] != 0x214449u)) {
+      DEBUG ((
+        DEBUG_ERROR,
+        "SHENGMEM:   not an android header (%08x %08x), nothing to publish\n",
+        Header[0],
+        Header[1]
+        ));
+      LogBufferWriteString ("SHENGMEM: NOT-ANDROID ");
+      LogBufferWriteHex (Header[0]);
+      LogBufferWriteString (" ");
+      LogBufferWriteHex (Header[1]);
+      LogBufferWriteString ("\n");
+      //
+      // Tell the panel too. The console scrolls these lines away long before the menu is
+      // drawn, and the menu saying "0 block device(s), 0 filesystem(s)" does not say which of
+      // the exits below was taken. The strip survives the clear.
+      //
+      BootScreenEvent (91, Header[0], Header[1], BootScreenKindDone);
+      return EFI_SUCCESS;
+    }
+
+    KernelSize  = Header[2];
+    RamdiskSize = Header[4];
+    PageSize    = Header[9];
+
+    if ((PageSize < 0x200) || ((PageSize & (PageSize - 1)) != 0) || (RamdiskSize == 0)) {
+      DEBUG ((
+        DEBUG_ERROR,
+        "SHENGMEM:   header says page %u ramdisk %u, refusing\n",
+        PageSize,
+        RamdiskSize
+        ));
+      LogBufferWriteString ("SHENGMEM: BAD-SIZES ");
+      LogBufferWriteDec (PageSize);
+      LogBufferWriteString (" ");
+      LogBufferWriteDec (RamdiskSize);
+      LogBufferWriteString ("\n");
+      BootScreenEvent (92, PageSize, RamdiskSize, BootScreenKindDone);
+      return EFI_SUCCESS;
+    }
+
+    RamdiskStart = Dtb + (UINT64)PageSize * (1 + ((UINT64)KernelSize + PageSize - 1) / PageSize);
+
+    DEBUG ((
+      DEBUG_ERROR,
+      "SHENGMEM:   kernel %u ramdisk %u page %u -> ramdisk at 0x%lx\n",
+      KernelSize,
+      RamdiskSize,
+      PageSize,
+      RamdiskStart
+      ));
+
+    LogBufferWriteString ("SHENGMEM: OK ramdisk at ");
+    LogBufferWriteHex (RamdiskStart);
+    LogBufferWriteString (" size ");
+    LogBufferWriteDec (RamdiskSize);
+    LogBufferWriteString ("\n");
+
+    PublishRamdisk (RamdiskStart, RamdiskStart + RamdiskSize);
+    BootScreenEvent (93, (UINT32)RamdiskStart, RamdiskStart + RamdiskSize, BootScreenKindDone);
+    return EFI_SUCCESS;
+  }
 
   //
   // FdtCheckHeader dereferences the pointer before it can tell us anything, so a pointer the

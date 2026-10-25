@@ -97,6 +97,23 @@ gMemoryDescriptor[] = {
   {"DFPS Data", 0xA2300000, 0x00100000, AddMem, MEM_RES, SYS_MEM_CAP, Reserv, WRITE_THROUGH_XN},
   {"DISP RDUMP", 0xAC000000, 0x01000000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
 
+  //
+  // Where the bootloader puts the boot image, and where it puts the device tree it derived
+  // from it.
+  //
+  // BootShim reports the address it was loaded at, and on this phone that is 0xA2408000 -
+  // immediately past DFPS Data, inside the 137 MiB that this map used to leave out between
+  // 0xA2400000 and 0xAC000000. Nothing that reads it can work while that gap has no
+  // descriptor: the MMU never maps it, and a read is a second-level translation fault rather
+  // than something catchable. ABL's device tree pointer, 0xA59FE000, is in the same gap.
+  //
+  // Only the first 15 MiB of the gap is claimed here. An earlier revision mapped all 137 MiB
+  // at once and the phone reset within seconds; the address that actually has to be reachable
+  // is the boot image's, so the range stops at 0xA3300000 and leaves the rest of the gap
+  // alone until something is known to need it.
+  //
+  {"DRAM 0xA2400000", 0xA2400000, 0x00F00000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
+
   // The rest of the low bank is free for DarwinBoot to hand to XNU.
   {"DRAM 0xAD000000", 0xAD000000, 0x13000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
 

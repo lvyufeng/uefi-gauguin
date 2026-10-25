@@ -41,6 +41,18 @@ _StackSize:
 
 _Start:
   mov   x4, x1
+
+  //
+  // Keep the address this shim was loaded at: it is the one fact about where the boot image
+  // lives that nothing later can recover. ABL chooses it, and the ramdisk and the device tree
+  // sit at fixed offsets from it - offsets the boot image header declares, not magic numbers
+  // this file would have to guess.
+  //
+  // x0 carries it into the firmware. ABL puts the device tree address there and every stage
+  // so far has found that address unreadable, so nothing is lost by replacing it with
+  // something the firmware can actually use.
+  //
+  mov   x19, x1
 #if BAO_PROBE == 1
   ldr   x7, =PROBE_COLOUR_ENTER
   bl    _Paint
@@ -62,6 +74,7 @@ _Entry:
   ldr   x7, =PROBE_COLOUR_JUMP
   bl    _Paint
 #endif
+  mov   x0, x19              /* boot image base, in place of ABL's device tree pointer */
   br    x5
 
 _Dead:

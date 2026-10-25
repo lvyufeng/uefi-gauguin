@@ -13,10 +13,12 @@
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
   SiliciumPkg/SiliciumPkg.dec
+  gauguinPkg/gauguin.dec
 
 [LibraryClasses]
   BaseLib
   BaseMemoryLib
+  BootScreenLib
   DebugLib
   DxeServicesTableLib
   FdtLib

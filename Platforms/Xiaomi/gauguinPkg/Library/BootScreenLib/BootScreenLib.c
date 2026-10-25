@@ -19,6 +19,7 @@
 
 #include <Uefi.h>
 #include <Library/BaseLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Library/BootScreenLib.h>
 
 //
@@ -331,10 +332,20 @@ BootScreenEvent (
   Row = mRow;
   if (Row >= MAX_ROWS) {
     //
-    // Full: repaint the window one row up and put this one at the bottom. The rows
-    // above are gone from the panel, which is the intended behaviour - the last
-    // eight events are what a stopped boot is asked about.
+    // Full: move the window up by one row, then draw at the bottom.
     //
+    // The previous version set Row to MAX_ROWS - 1 and left it at that, which does not scroll
+    // - it overwrites the last row on every event. On a boot that dispatches ninety drivers
+    // and then reports a parked one, every earlier event was erased before it could be read,
+    // and the panel ended up showing only the final line. The rows are copied as pixels, four
+    // bytes at a time, because there is no second buffer to shuffle text between.
+    //
+    CopyMem (
+      (VOID *)(UINTN)(PANEL_BASE + (UINT64)STATUS_TOP * PANEL_WIDTH * PANEL_BPP),
+      (VOID *)(UINTN)(PANEL_BASE + (UINT64)(STATUS_TOP + ROW_HEIGHT + ROW_GAP) * PANEL_WIDTH * PANEL_BPP),
+      (UINTN)((MAX_ROWS - 1) * (ROW_HEIGHT + ROW_GAP) * PANEL_WIDTH * PANEL_BPP)
+      );
+
     Row = MAX_ROWS - 1;
   }
 
