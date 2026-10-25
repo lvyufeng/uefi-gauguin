@@ -27,8 +27,11 @@ probe = false
 # 3 MiB ends at 0x9FF00000, below the SEC heap and the UEFI stack.
 #
 [uefi_fd]
-base = 0x9FC00000
-size = 0x300000
+# 11 MiB: the vendor DXE set compresses to just over 3 MiB, and at that point the volume was
+# truncated and dispatch stopped on the driver that fell off the end. The region grows downwards
+# into the free memory above the modem; SEC Heap starts at 0x9FF00000, so it cannot grow up.
+base = 0x9F400000
+size = 0xB00000
 
 #
 # Android Boot Image Kernel Configs
@@ -54,4 +57,7 @@ base = 0x0
 kernel_offset = 0x8000
 ramdisk_offset = 0x1000000
 tags_offset = 0x100
+# The stock boot image on this phone declares the tree at 0x1F00000, and it is also what
+# mkbootimg defaults to. Stated here so a change to the default cannot move the tree silently.
+dtb_offset = 0x1F00000
 pagesize = 0x1000

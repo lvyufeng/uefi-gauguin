@@ -1,0 +1,27 @@
+## @file
+#  Draw the dispatcher's progress on the panel without a console.
+#
+#  BASE-class on purpose: DxeMain links it, and the one thing it must never do is
+#  wait for a protocol or allocate from the pool it is trying to describe.
+#
+#  Copyright (c) 2026, the UniXNU contributors.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = BootScreenLib
+  FILE_GUID      = 2B7E9C41-6A83-4F15-9D02-E83C5B6A17D4
+  MODULE_TYPE    = BASE
+  VERSION_STRING = 1.0
+  LIBRARY_CLASS  = BootScreenLib
+
+[Sources]
+  BootScreenLib.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  gauguinPkg/gauguin.dec
+
+[LibraryClasses]
+  BaseLib

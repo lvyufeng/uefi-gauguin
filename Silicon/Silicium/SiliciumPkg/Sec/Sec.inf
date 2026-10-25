@@ -36,6 +36,7 @@
   DebugLib
   DebugAgentLib
   BaseMemoryLib
+  IoLib
   PlatformSecLib
   PrePiHobListPointerLib
   CacheMaintenanceLib
@@ -52,6 +53,7 @@
 
 [Guids]
   gArmMpCoreInfoGuid
+  gSiliciumEntryArgHobGuid
 
 [Pcd]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString

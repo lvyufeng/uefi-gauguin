@@ -1,0 +1,35 @@
+## @file
+#  Paint the boot's progress onto the panel without a console.
+#
+#  Depex is TRUE and the library list is deliberately short: this driver exists to be
+#  readable when nothing else is, so it must not wait on any protocol or library that
+#  a failed driver could have withheld. See BootScreenDxe.c for why it draws into the
+#  splash buffer directly instead of going through GOP or ConOut.
+#
+#  Copyright (c) 2026, the UniXNU contributors.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x0001001B
+  BASE_NAME      = BootScreenDxe
+  FILE_GUID      = 8A1F2D64-3C57-4E92-B0A6-7D5E1C489F31
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT    = BootScreenEntry
+
+[Sources]
+  BootScreenDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  PcdLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Depex]
+  TRUE

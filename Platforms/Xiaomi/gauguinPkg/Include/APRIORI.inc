@@ -24,6 +24,13 @@ APRIORI DXE {
   INF MdeModulePkg/Core/Dxe/DxeMain.inf
   INF MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
 
+  #
+  # First of all the drivers: paint the stage list on the panel while the framebuffer
+  # is still the one ABL left, so that every later failure has something on screen. It
+  # needs no protocol, so an early slot costs dispatch order nothing.
+  #
+  INF gauguinPkg/Drivers/BootScreenDxe/BootScreenDxe.inf
+
   INF Binaries/gauguin/QcomPkg/Drivers/EnvDxe/EnvDxe.inf
 
   INF MdeModulePkg/Universal/ReportStatusCodeRouter/RuntimeDxe/ReportStatusCodeRouterRuntimeDxe.inf
@@ -54,11 +61,21 @@ APRIORI DXE {
   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
 
   INF Binaries/gauguin/QcomPkg/Drivers/SdccDxe/SdccDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/UFSDxe/UFSDxe.inf
+  # UFSDxe is out for one run. It identifies the chip (SK hynix H9HQ15AFAMADAR) and its boot LUN,
+  # then fails the RPMB/sleep registration and never returns: no << DONE, and the phone drops off
+  # USB a moment later. The iOS payload does not need it - the kernel arrives in a ramdisk that
+  # ShengBootMemoryDxe publishes from /chosen in the device tree.
+  # INF Binaries/gauguin/QcomPkg/Drivers/UFSDxe/UFSDxe.inf
 
-  INF FatPkg/EnhancedFatDxe/Fat.inf
+  # Fat is out of the batch for one run: CoreLoadImage hangs inside it (see the "loading
+  # 961578FE ... " line and the silence after it), and the boot manager does not need a
+  # filesystem for the payload - it arrives in a ramdisk that ShengBootMemoryDxe publishes.
+  # INF FatPkg/EnhancedFatDxe/Fat.inf
 
-  INF Binaries/gauguin/QcomPkg/Drivers/TzDxe/TzDxeLA.inf
+  # TzDxe is out for one run: GetFileBufferByFilePath never returns while reading its image
+  # out of the volume, and the next driver in the batch tells us whether that is TzDxe
+  # alone or the reader itself.
+  # INF Binaries/gauguin/QcomPkg/Drivers/TzDxe/TzDxeLA.inf
 
   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
 
@@ -72,19 +89,21 @@ APRIORI DXE {
   INF MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
   INF EmbeddedPkg/EmbeddedMonotonicCounter/EmbeddedMonotonicCounter.inf
-  INF EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf
+  # INF EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf   [bisect: dropped]
   INF MdeModulePkg/Universal/PrintDxe/PrintDxe.inf
   INF MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
-  INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+  # INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf   [bisect: dropped]
   INF MdeModulePkg/Universal/HiiDatabaseDxe/HiiDatabaseDxe.inf
-  INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
+  # UniXNUDxe is the boot manager here, not BdsDxe: it registers the payload's entry and waits
+  # on the two variable protocols published a few modules above.
+  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
 
-  INF Binaries/gauguin/QcomPkg/Drivers/GpiDxe/GpiDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/I2CDxe/I2CDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/AdcDxe/AdcDxe.inf
+  # INF Binaries/gauguin/QcomPkg/Drivers/GpiDxe/GpiDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/I2CDxe/I2CDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/AdcDxe/AdcDxe.inf   [bisect: dropped]
   INF Binaries/gauguin/QcomPkg/Drivers/UsbPwrCtrlDxe/UsbPwrCtrlDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/QcomChargerDxe/QcomChargerDxeLA.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/ChargerExDxe/ChargerExDxe.inf
+  # INF Binaries/gauguin/QcomPkg/Drivers/QcomChargerDxe/QcomChargerDxeLA.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/ChargerExDxe/ChargerExDxe.inf   [bisect: dropped]
   INF Binaries/gauguin/QcomPkg/Drivers/UsbfnDwc3Dxe/UsbfnDwc3Dxe.inf
 
   INF MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
@@ -94,21 +113,21 @@ APRIORI DXE {
   INF Binaries/gauguin/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/UsbDeviceDxe/UsbDeviceDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/UsbConfigDxe/UsbConfigDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/TsensDxe/TsensDxe.inf
+  # INF Binaries/gauguin/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/TsensDxe/TsensDxe.inf   [bisect: dropped]
 
 !if $(USE_CUSTOM_DISPLAY_DRIVER) == 1
-  INF Binaries/gauguin/QcomPkg/Drivers/DisplayDxe/DisplayDxe.inf
-  INF QcomPkg/Drivers/DisplayReEnablerDxe/DisplayReEnablerDxe.inf
+  # INF Binaries/gauguin/QcomPkg/Drivers/DisplayDxe/DisplayDxe.inf   [bisect: dropped]
+  # INF QcomPkg/Drivers/DisplayReEnablerDxe/DisplayReEnablerDxe.inf   [bisect: dropped]
 !else
   INF SiliciumPkg/Drivers/SimpleFbDxe/SimpleFbDxe.inf
 !endif
 
-  INF Binaries/gauguin/QcomPkg/Drivers/LimitsDxe/LimitsDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/HashDxe/HashDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/CipherDxe/CipherDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/RNGDxe/RngDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/DDRInfoDxe/DDRInfoDxe.inf
+  # INF Binaries/gauguin/QcomPkg/Drivers/LimitsDxe/LimitsDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/HashDxe/HashDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/CipherDxe/CipherDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/RNGDxe/RngDxe.inf   [bisect: dropped]
+  # INF Binaries/gauguin/QcomPkg/Drivers/DDRInfoDxe/DDRInfoDxe.inf   [bisect: dropped]
 
   INF EmbeddedPkg/SimpleTextInOutSerial/SimpleTextInOutSerial.inf
   INF MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf

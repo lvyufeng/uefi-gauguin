@@ -80,14 +80,21 @@
 
   INF Binaries/gauguin/QcomPkg/Drivers/DALSYSDxe/DALSYSDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/ClockDxe/ClockDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/VcsDxe/VcsDxe.inf
+  # VcsDxe is out for one run. The recording puts the crash right after [#67] PwrUtilsDxe, and
+  # the next driver to start is VcsDxe: it takes a data abort at FAR=0xA59FE000 (89 MiB past the
+  # start of the display window, an address no memory map declares), with that same value sitting
+  # on the stack at SP. Without it we find out immediately whether it is the one that faults.
+  # INF Binaries/gauguin/QcomPkg/Drivers/VcsDxe/VcsDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/HALIOMMUDxe/HALIOMMUDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/HWIODxe/HWIODxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/GpiDxe/GpiDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/I2CDxe/I2CDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/SPMIDxe/SPMIDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/SdccDxe/SdccDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/UFSDxe/UFSDxe.inf
+  # UFSDxe is packaged but not dispatched: DFX.inc only decides a-priori order, so a driver left
+  # here is still started as soon as its depex is met. It identifies the chip and its boot LUN,
+  # then never returns (no RPMB protocol, no sleep callback), taking the boot with it.
+  # INF Binaries/gauguin/QcomPkg/Drivers/UFSDxe/UFSDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/TLMMDxe/TLMMDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/FeatureEnablerDxe/FeatureEnablerDxe.inf
 
@@ -130,7 +137,19 @@
   INF Binaries/gauguin/QcomPkg/Drivers/RNGDxe/RngDxe.inf
 
   INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/QcomBds/QcomBds.inf
 
   # INF Binaries/gauguin/QcomPkg/Drivers/PILDxe/PILDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/ShmBridgeDxe/ShmBridgeDxeLA.inf
+
+  #
+  # The iOS loader chain.
+  #
+  INF gauguinPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  INF DarwinBootPkg/Driver/DarwinBoot.inf
+
+  #
+  # The log writer; see gauguin.dsc. Packaged here without an APRIORI line, so the
+  # dispatcher parks it on its block-I/O dependency until something publishes one.
+  #
+  INF gauguinPkg/Drivers/PlogDxe/PlogDxe.inf
+  INF gauguinPkg/Drivers/BootScreenDxe/BootScreenDxe.inf

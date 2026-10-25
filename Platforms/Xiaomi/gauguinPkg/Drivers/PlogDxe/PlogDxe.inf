@@ -1,0 +1,36 @@
+## @file
+#  Copy the firmware's log ring into the logdump partition.
+#
+#  Copyright (c) 2026, the UniXNU contributors.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = PlogDxe
+  FILE_GUID      = 5C3E7A14-9B2D-4F60-8E17-D4A9C60B1F28
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT    = PlogEntry
+
+[Sources]
+  PlogDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  gauguinPkg/gauguin.dec
+
+[LibraryClasses]
+  BaseMemoryLib
+  DevicePathLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiBlockIoProtocolGuid
+  gEfiDevicePathProtocolGuid
+
+[Depex]
+  gEfiBlockIoProtocolGuid

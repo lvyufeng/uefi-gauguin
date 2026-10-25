@@ -15,6 +15,9 @@
 #include <Library/MemoryMapHelperLib.h>
 #include <Library/TimerLib.h>
 #include <Library/HobLib.h>
+#include <Library/IoLib.h>
+
+extern UINT64  gSecEntryArg0;
 
 #include "Sec.h"
 
@@ -129,6 +132,27 @@ SecMain (VOID)
   if (EFI_ERROR (Status)) {
     return;
   }
+
+  //
+  // Pass on what the previous stage handed over in x0. On this phone that is the
+  // address of the ABL's device tree, and ShengBootMemoryDxe needs it: the
+  // ramdisk it publishes as a block device is found by its /chosen node.
+  //
+  {
+    UINT64  EntryArg = gSecEntryArg0;
+
+    BuildGuidDataHob (&gSiliciumEntryArgHobGuid, &EntryArg, sizeof (EntryArg));
+  }
+
+  //
+  // Disarm the APSS watchdog before anything else.
+  //
+  // ABL arms it and hands over; nothing in this firmware ever kicks it, so the phone resets
+  // part-way through DXE and the boot starts over - which reads on the panel as a boot that
+  // simply never gets further than the last driver it reached. WDT0 control lives at
+  // 0x17C10000: write the enable bit off before touching memory or the timer.
+  //
+  MmioWrite32 (0x17C10000, 0);
 
   // Run Library Cconstructors
   ProcessLibraryConstructorList ();
