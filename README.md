@@ -1,8 +1,9 @@
 # uefi-gauguin
 
 Mu-Silicium UEFI port for the Xiaomi Redmi Note 9 Pro 5G / Mi 10T Lite
-(`gauguin`, Qualcomm **SM7125 "lagoon"**), the firmware half of the
-[UniXNU-gauguin](https://github.com/lvyufeng/UniXNU-gauguin) device port.
+(`gauguin`, Qualcomm **SM7225** Snapdragon 750G, Adreno **619**), the firmware
+half of the [UniXNU-gauguin](https://github.com/lvyufeng/UniXNU-gauguin)
+device port.
 
 The UEFI environment supplies what UniXNU and DarwinBoot need
 ([layer model](https://unixnu.com/guide/overview)):
@@ -17,10 +18,13 @@ The UEFI environment supplies what UniXNU and DarwinBoot need
 
 ## Provenance
 
-This port derives from the `miatoll` Mu-Silicium package: `miatoll` is Xiaomi's
-codename for the SM7125 family, so the SoC support, memory map and firmware
-binaries carry over directly. What changes for gauguin is the device
-configuration, the UEFI device tree and the firmware-volume addresses.
+The layout follows the `miatoll` Mu-Silicium package, which is the closest
+existing Qualcomm device port and a reasonable structural starting point. It is
+not this phone's SoC support: `gauguin` is the SM7225, and every platform
+constant here - the memory map, the firmware-volume base and size, the ADT and
+the panel - has been derived from this phone's own `/proc/iomem`, its device
+tree and the signed drivers it ships, not from miatoll's. Check any inherited
+value against the device before trusting it.
 
 Upstream: [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium),
 reference port layout [UniXNU/uefi-sheng](https://github.com/UniXNU/uefi-sheng).
