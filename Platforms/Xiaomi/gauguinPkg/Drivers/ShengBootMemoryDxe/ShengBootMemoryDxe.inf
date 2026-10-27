@@ -30,8 +30,16 @@
 
 [Guids]
   gSiliciumEntryArgHobGuid                      ## CONSUMES
+  gFdtTableGuid
+  gEfiFileInfoGuid
+  gEfiFileSystemInfoGuid
 
 [Protocols]
+  gEfiDriverBindingProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid              ## PRODUCES
+  gEfiDiskIoProtocolGuid
+  gEfiDiskIo2ProtocolGuid
+  gEfiUnicodeCollation2ProtocolGuid
   gEfiBlockIoProtocolGuid                       ## PRODUCES
   gEfiDevicePathProtocolGuid                    ## PRODUCES
 

@@ -112,7 +112,18 @@ gMemoryDescriptor[] = {
   // is the boot image's, so the range stops at 0xA3300000 and leaves the rest of the gap
   // alone until something is known to need it.
   //
-  {"DRAM 0xA2400000", 0xA2400000, 0x00F00000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
+  //
+  // The ramdisk lives in this range and the filesystem driver walks all of it.
+  //
+  // The range used to stop at 0xA3300000 - 15 MiB, enough to reach the boot image - and that
+  // was short: the payload ramdisk is 72 MiB starting at 0xA2F80080, so Fat reads past the end
+  // of the mapping partway through the volume and dies on it. The recorded abort was a third
+  // level translation fault at FAR 0xA3300000 with the address in X8, which is that boundary
+  // exactly, reached from UniXNU's own code.
+  //
+  // The end is the ramdisk's end, page aligned: 0xA2F80080 + 72 MiB = 0xA7780080.
+  //
+  {"RAMDISK 0xA2400000", 0xA2400000, 0x05381000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
 
   // The rest of the low bank is free for DarwinBoot to hand to XNU.
   {"DRAM 0xAD000000", 0xAD000000, 0x13000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},

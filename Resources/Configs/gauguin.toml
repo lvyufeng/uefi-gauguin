@@ -43,6 +43,23 @@ size = 0xB00000
 [boot_image_kernel]
 kernel_compression = "gzip"
 append_dtb         = false
+#
+# The ramdisk travels inside the kernel blob. ABL decompresses the kernel and keeps nothing
+# else, so a separately loaded ramdisk never reaches memory the firmware can read; inside the
+# kernel it arrives with everything else, and its address is the shim's plus the length of
+# shim+firmware, which the shim knows at build time.
+#
+ramdisk_in_kernel  = true
+
+#
+# The device tree travels the same way, after the ramdisk.
+#
+# The firmware has to install it as a configuration table, because that is where UniXNU looks
+# for a boot entry whose tree is "firmware" - and until it is there, starting the entry ends
+# with EFI_NOT_FOUND before the kernel is even touched. The bootloader keeps no copy of the
+# boot image, so inside the kernel is the only route to the firmware's memory.
+#
+dtb_in_kernel       = true
 
 #
 # Android Boot Image Configs

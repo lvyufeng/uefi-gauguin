@@ -39,11 +39,15 @@
 #define COLOR_FAULT      0x00FF2020u
 #define COLOR_CURRENT    0x0000C0FFu
 
+// Six rows is what fits: rows 0..5 land at 1400..2020 and the last ends at 2130, inside the
+// 2248 rows ABL scans out. Eight rows would need to start higher, and moving them there put
+// the strip on top of the console - the panel came back as a single grey band - so the list
+// keeps its place and shows fewer events instead.
 #define STATUS_TOP       1400u   // where the scrolling list begins
 #define ROW_HEIGHT       110u
 #define ROW_GAP          14u
 #define ROW_LEFT         40u
-#define MAX_ROWS         8
+#define MAX_ROWS         6
 
 #define GLYPH_W          5u
 #define GLYPH_H          7u
@@ -278,6 +282,14 @@ BootScreenClear (
   )
 {
   FillBand (0, PANEL_HEIGHT, COLOR_BACKGROUND);
+
+  //
+  // A band across the very top, so a photograph answers "is this frame from this boot?" before
+  // any text is read. It is painted by the clear that precedes every dispatch, so if it is
+  // there the rows below it belong to the boot that is being looked at.
+  //
+  FillBand (0, 40, COLOR_CURRENT);
+
   DrawText (ROW_LEFT, 120, (CHAR8 *)"BOOT SCREEN", COLOR_TEXT);
   DrawText (ROW_LEFT, 120 + ROW_HEIGHT, (CHAR8 *)"DISPATCH LOG", COLOR_TEXT);
   mRow   = 0;
@@ -311,6 +323,22 @@ BootScreenEvent (
   UINT32  Row;
   UINT32  Top;
   UINT32  Colour;
+
+  //
+  // Wipe the panel before the first event of this boot.
+  //
+  // Nothing used to call BootScreenClear(), so every boot drew on top of whatever the previous
+  // one left there. A photograph then could not be trusted: a line that looked like this boot's
+  // progress could have been minutes old, and a boot that never reached the dispatcher at all
+  // could look like one that stopped halfway through it. One clear at the start makes the panel
+  // mean what it says.
+  //
+  STATIC BOOLEAN  Cleared = FALSE;
+
+  if (!Cleared) {
+    Cleared = TRUE;
+    BootScreenClear ();
+  }
 
   Length       = 0;
   Line[Length++] = '#';

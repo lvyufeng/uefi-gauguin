@@ -161,6 +161,7 @@
   UniXNUPkg/Application/UniXNU/UniXNU.inf
   UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
   gauguinPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  gauguinPkg/Drivers/UsbProbeDxe/UsbProbeDxe.inf
   DarwinBootPkg/Driver/DarwinBoot.inf
 
   #

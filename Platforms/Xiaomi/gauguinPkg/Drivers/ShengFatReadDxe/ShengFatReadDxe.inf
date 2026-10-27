@@ -1,0 +1,44 @@
+## @file
+#  A read-only FAT32 filesystem over the ramdisk published in memory.
+#
+#  FatPkg is in this firmware and never runs on this board: the disk drivers are loaded, never
+#  dispatched, and their protocols never appear. This driver is the volume UniXNU needs, parsed
+#  straight out of the ramdisk's bytes, with no dispatcher involvement beyond its own start.
+#
+#  Copyright (c) 2026, UniXNU contributors. All rights reserved.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x00010019
+  BASE_NAME      = ShengFatReadDxe
+  FILE_GUID      = 7C1A54E2-9B3D-4F86-A0C7-2E5D8B41F693
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 0.1
+  ENTRY_POINT    = ShengFatReadDxeEntry
+
+[Sources]
+  ShengFatReadDxe.c
+  ShengFatReadDxe.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+  gauguinPkg/gauguin.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiSimpleFileSystemProtocolGuid                ## PRODUCES
+
+[Guids]
+  gEfiFileInfoGuid
+  gEfiFileSystemInfoGuid
+
+[Depex]
+  TRUE

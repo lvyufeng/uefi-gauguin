@@ -43,16 +43,27 @@ _Start:
   mov   x4, x1
 
   //
-  // Keep the address this shim was loaded at: it is the one fact about where the boot image
-  // lives that nothing later can recover. ABL chooses it, and the ramdisk and the device tree
-  // sit at fixed offsets from it - offsets the boot image header declares, not magic numbers
-  // this file would have to guess.
+  // Hand the ramdisk's address to the firmware in x0.
   //
-  // x0 carries it into the firmware. ABL puts the device tree address there and every stage
-  // so far has found that address unreadable, so nothing is lost by replacing it with
-  // something the firmware can actually use.
+  // Not the boot image's base: that was tried, the arithmetic checked out against the
+  // measured _Payload (base 0xA247F000), and the first word there was 0xFFCDFFDD rather than
+  // "ANDRO". ABL decompresses the kernel and never leaves the original image behind, so the
+  // Android header is not in memory at all and cannot be found this way.
   //
-  mov   x19, x1
+  // What is known is where the kernel ends. The kernel region is this shim followed by the
+  // firmware volume - one contiguous blob, one gzip stream - so after decompression the
+  // ramdisk, which the boot image puts after the kernel, follows the volume. _Payload marks
+  // the volume's first byte, FD_SIZE is its length, and the sum is the first byte past it.
+  //
+  // Whether ABL actually leaves the ramdisk there is the question this answers: the firmware
+  // reads the candidate and reports what it found.
+  //
+  // ABL puts a device tree pointer in x0 and every stage so far has found that pointer
+  // unreadable, so nothing is lost by replacing it.
+  //
+  mov   x19, x1              /* x19 = _Payload: first byte past the shim */
+  ldr   x9,  =FD_SIZE
+  add   x19, x19, x9         /* x19 = first byte past the kernel         */
 #if BAO_PROBE == 1
   ldr   x7, =PROBE_COLOUR_ENTER
   bl    _Paint

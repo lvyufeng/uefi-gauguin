@@ -22,13 +22,157 @@
 #include <Library/DebugLib.h>
 #include <Library/DxeServicesTableLib.h>
 #include <Library/FdtLib.h>
+#include <Guid/Fdt.h>
 #include <Library/HobLib.h>
 #include <Library/BootScreenLib.h>
+
+//
+// Where this driver leaves its verdict for the menu to read. Must stay inside the "Log Buffer"
+// mapping in MemoryMapLib.c and clear of the ring that starts at its base.
+//
+#define ShengMemSlot  0x9FFFE000ULL
+
+STATIC UINT64  gSecEntryArg0Shadow;
 #include <Library/LogBufferLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/BlockIo.h>
+#include <Protocol/DiskIo.h>
+#include <Protocol/DiskIo2.h>
+#include <Protocol/SimpleFileSystem.h>
+#include <Protocol/UnicodeCollation.h>
 #include <Protocol/DevicePath.h>
+#include <Guid/FileInfo.h>
+#include <Guid/FileSystemInfo.h>
+
+//
+// FAT32 on-disk structures. Only the fields this reader uses are named.
+//
+#pragma pack(1)
+
+typedef struct {
+  UINT8     Jump[3];
+  UINT8     OemName[8];
+  UINT16    BytesPerSector;
+  UINT8     SectorsPerCluster;
+  UINT16    ReservedSectors;
+  UINT8     NumberOfFats;
+  UINT16    RootEntryCount;
+  UINT16    TotalSectors16;
+  UINT8     Media;
+  UINT16    FatSize16;
+  UINT16    SectorsPerTrack;
+  UINT16    NumberOfHeads;
+  UINT32    HiddenSectors;
+  UINT32    TotalSectors32;
+  UINT32    FatSize32;
+  UINT16    ExtFlags;
+  UINT16    FileSystemVersion;
+  UINT32    RootCluster;
+  UINT16    FileSystemInfo;
+  UINT16    BackupBootSector;
+  UINT8     Reserved[12];
+  UINT8     DriveNumber;
+  UINT8     Reserved1;
+  UINT8     BootSignature;
+  UINT32    VolumeId;
+  UINT8     VolumeLabel[11];
+  UINT8     FileSystemType[8];
+} FAT_BOOT_SECTOR;
+
+typedef struct {
+  UINT8     Name[11];
+  UINT8     Attributes;
+  UINT8     NtReserved;
+  UINT8     CreationTenths;
+  UINT16    CreationTime;
+  UINT16    CreationDate;
+  UINT16    LastAccessDate;
+  UINT16    FirstClusterHigh;
+  UINT16    WriteTime;
+  UINT16    WriteDate;
+  UINT16    FirstClusterLow;
+  UINT32    FileSize;
+} FAT_DIR_ENTRY;
+
+//
+// One long-name entry, exactly 32 bytes like every directory entry.
+//
+// The thirteen UTF-16 characters are split three ways around the fields that are not part of
+// the name: five at Name1, then six at Name3, then two at Name2. The order is not
+// sequential in the struct, which is the part that is easy to get wrong.
+//
+//
+// One long-name entry: 32 bytes, thirteen UTF-16 characters split three ways by two fields
+// that are not part of the name.
+//
+//   0      sequence
+//   1-10   characters 0-4
+//   11-13  attributes, type, checksum
+//   14-19  characters 5-7
+//   20-25  characters 8-10
+//   26-27  the cluster field, which FAT keeps here and this reader does not need
+//   28-31  the 0xFFFF terminator
+//
+typedef struct {
+  UINT8     Sequence;
+  UINT8     Name1[10];
+  UINT8     Attributes;
+  UINT8     Type;
+  UINT8     Checksum;
+  UINT16    Name2[3];
+  UINT16    Name3[3];
+  UINT16    Cluster;
+  UINT32    Tail;           // character 12 in its low half, padding above
+} FAT_LFN_ENTRY;
+
+STATIC_ASSERT (sizeof (FAT_LFN_ENTRY) == 32, "a long-name entry is one directory entry");
+
+#pragma pack()
+
+#define FAT_ATTRIBUTE_DIRECTORY  0x10
+#define FAT_ATTRIBUTE_VOLUME_ID  0x08
+#define FAT_ATTRIBUTE_LFN        0x0F
+
+#define FAT_FREE_CLUSTER         0x00000000u
+#define FAT_BAD_CLUSTER          0x0FFFFFF7u
+#define FAT_END_OF_CHAIN         0x0FFFFFF8u
+#define FAT_CLUSTER_MASK         0x0FFFFFFFu
+
+//
+// A mounted volume. UniXNU opens files by path, so the reader walks the directory tree from
+// RootCluster each time rather than keeping an open-directory object per handle.
+//
+typedef struct {
+  UINT8     *Base;            // first byte of the ramdisk
+  UINT64    Size;             // its size in bytes
+  UINT32    BytesPerCluster;
+  UINT32    FatOffset;        // byte offset of the first FAT copy
+  UINT32    DataOffset;       // byte offset of cluster 2
+  UINT32    RootCluster;
+  UINT32    MaxCluster;       // one past the last usable cluster
+  EFI_HANDLE DeviceHandle;
+  EFI_DEVICE_PATH_PROTOCOL  *DevicePath;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  SimpleFileSystem;
+} FAT_VOLUME;
+
+//
+// A position in the volume's directory tree plus, for a file, an offset into it.
+//
+#define SHENG_FAT_MAX_PATH  260
+
+typedef struct {
+  UINT32    ObjectId;
+  CHAR16    Path[SHENG_FAT_MAX_PATH];   // absolute, backslash separated, for GetInfo
+  UINT8     Attributes;
+  UINT32    FirstCluster;
+  UINT64    FileSize;
+  UINT64    Position;
+} SHENG_FAT_OBJECT;
+
+#ifndef FDT_MAGIC
+#define FDT_MAGIC  0xD00DFEED
+#endif
 
 #define MAX_RANGES        64
 #define MIN_PIECE_SIZE    SIZE_16MB
@@ -389,6 +533,1161 @@ STATIC EFI_BLOCK_IO_PROTOCOL  mBlockIo = {
   @param[in]  Start  First byte of the ramdisk.
   @param[in]  End    One past the last byte.
 **/
+/** @file
+  A read-only FAT32 filesystem over the ramdisk published in memory.
+
+  See ShengFatReadDxe.h for why this exists instead of FatPkg.
+
+  Copyright (c) 2026, UniXNU contributors. All rights reserved.
+  SPDX-License-Identifier: BSD-2-Clause-Patent
+**/
+
+
+//
+// Every open file is one of these. EFI_FILE_PROTOCOL must be its first member so a pointer to
+// the protocol is a pointer to the object.
+//
+typedef struct {
+  EFI_FILE_PROTOCOL    File;
+  FAT_VOLUME           *Volume;
+  SHENG_FAT_OBJECT     Object;
+  //
+  // Where the last read left off, in the chain.
+  //
+  // Reaching a position used to mean walking FirstCluster forward one link at a time, every
+  // call, from the start. The kernel is fifty-seven megabytes and is read in eight megabyte
+  // pieces, so the sixth piece walked forty-two thousand links that the fifth had already
+  // walked - and by the last piece the read had become quadratic in the file size. The screen
+  // stopped after "DB08 allocated", which read as a hang. Keeping the cluster under the cursor
+  // turns each read into one walk of the links it actually needs.
+  //
+  UINT32               CursorCluster;
+  UINT64               CursorPosition;
+} FAT_FILE;
+
+STATIC UINT32  mOpenFileCount;
+
+//
+// Prototypes for the file protocol handlers, so the templates at the end of this file can name
+// them without a forward declaration per function.
+//
+STATIC EFI_SIMPLE_FILE_SYSTEM_PROTOCOL mSimpleFileSystemTemplate;
+STATIC EFI_FILE_PROTOCOL               mRootTemplate;
+
+//
+// ---------------------------------------------------------------------------
+// On-disk parsing
+// ---------------------------------------------------------------------------
+//
+
+STATIC
+UINT32
+ClusterToOffset (
+  IN FAT_VOLUME  *Volume,
+  IN UINT32      Cluster
+  )
+{
+  return Volume->DataOffset + (Cluster - 2) * Volume->BytesPerCluster;
+}
+
+//
+// The next cluster in a chain, or FAT_END_OF_CHAIN when the chain stops.
+//
+STATIC
+UINT32
+NextCluster (
+  IN FAT_VOLUME  *Volume,
+  IN UINT32      Cluster
+  )
+{
+  UINT32  Offset;
+  UINT32  Value;
+
+  Offset = Volume->FatOffset + Cluster * 4;
+  if (Offset + 4 > Volume->Size) {
+    return FAT_END_OF_CHAIN;
+  }
+
+  CopyMem (&Value, Volume->Base + Offset, sizeof (Value));
+  Value &= FAT_CLUSTER_MASK;
+
+  if ((Value < 2) || (Value >= Volume->MaxCluster) || (Value == FAT_BAD_CLUSTER)) {
+    return FAT_END_OF_CHAIN;
+  }
+
+  return Value;
+}
+
+//
+// Compare a raw 11-byte directory name with a caller-supplied name.
+//
+// The on-disk name is space padded and has no dot; the caller's name is a normal "NAME.EXT". The
+// comparison folds case, because everything UniXNU asks for is lower case and the volume stores
+// upper.
+//
+STATIC
+BOOLEAN
+NameMatches (
+  IN CONST UINT8   *Raw,
+  IN CONST CHAR16  *Name
+  )
+{
+  CHAR8   Wanted[12];
+  UINTN   Length;
+  UINTN   Index;
+  CHAR8   Ch;
+  UINT8   Stored;
+
+  if ((Raw[0] == 0x00) || (Raw[0] == 0xE5)) {
+    return FALSE;
+  }
+
+  //
+  // The name as it is stored, before any 8.3 reshaping: eleven characters, space padded.
+  //
+  // A caller that has the on-disk name already - the short name a directory listing showed it -
+  // passes "KERNEL~1MAC", which is eleven characters and has no dot. Treating that as a name
+  // plus extension turned it into "KERNEL~1   " and it matched nothing, so a request that
+  // named the file exactly failed with EFI_NOT_FOUND.
+  //
+  {
+    CHAR8   Exact[12];
+    UINTN   At;
+
+    ZeroMem (Exact, sizeof (Exact));
+    SetMem (Exact, 11, ' ');
+
+    for (At = 0; (At < 11) && (Name[At] != 0); At++) {
+      Exact[At] = (CHAR8)Name[At];
+      if ((Exact[At] >= 'a') && (Exact[At] <= 'z')) {
+        Exact[At] = (CHAR8)(Exact[At] - 'a' + 'A');
+      }
+    }
+
+    if ((Name[At] == 0) && (At == 11)) {
+      UINTN  Matches = 0;
+
+      for (At = 0; At < 11; At++) {
+        UINT8  Stored = Raw[At];
+
+        if ((Stored >= 'a') && (Stored <= 'z')) {
+          Stored = (UINT8)(Stored - 'a' + 'A');
+        }
+
+        if (Stored == (UINT8)Exact[At]) {
+          Matches++;
+        }
+      }
+
+      if (Matches == 11) {
+        return TRUE;
+      }
+    }
+  }
+
+  //
+  // Build the on-disk form of the wanted name: eight characters, a dot if there is an
+  // extension, then three.
+  //
+  ZeroMem (Wanted, sizeof (Wanted));
+  SetMem (Wanted, 11, ' ');
+
+  Length = 0;
+  for (Index = 0; (Name[Index] != 0) && (Length < 8); Index++) {
+    Ch = (CHAR8)Name[Index];
+    if (Ch == '.') {
+      break;
+    }
+
+    Wanted[Length++] = Ch;
+  }
+
+  //
+  // Skip to the extension: everything after the first dot.
+  //
+  while ((Name[Index] != 0) && (Name[Index] != '.')) {
+    Index++;
+  }
+
+  if (Name[Index] == '.') {
+    Index++;
+    Length = 8;
+    while ((Name[Index] != 0) && (Length < 11)) {
+      Wanted[Length++] = (CHAR8)Name[Index];
+      Index++;
+    }
+  }
+
+  for (Index = 0; Index < 11; Index++) {
+    Stored = Raw[Index];
+    Ch     = Wanted[Index];
+
+    if ((Stored >= 'a') && (Stored <= 'z')) {
+      Stored = (UINT8)(Stored - 'a' + 'A');
+    }
+
+    if ((Ch >= 'a') && (Ch <= 'z')) {
+      Ch = (CHAR8)(Ch - 'a' + 'A');
+    }
+
+    if (Stored != (UINT8)Ch) {
+      return FALSE;
+    }
+  }
+
+  return TRUE;
+}
+
+//
+// Assemble the long name that precedes a directory entry.
+//
+// The volume stores "unixnu.toml" as LFN entries followed by the 8.3 name UNIXNU~1.TOM, and
+// UniXNU asks for the long name. Matching on the short name alone therefore finds nothing on a
+// volume that mounts perfectly - which is exactly what happened: one filesystem, and still no
+// entries, because every name UniXNU asks for is longer than 8.3.
+//
+// A long name is stored in sequence-numbered entries, each holding 13 UTF-16 characters, in
+// reverse order: the entry with the highest sequence number comes first and the one with bit 6
+// of its sequence byte set is the last.
+//
+STATIC
+VOID
+AssembleLongName (
+  IN  FAT_LFN_ENTRY  *Entry,
+  OUT CHAR16         *Name,
+  IN  UINTN          NameChars
+  )
+{
+  UINTN   Sequence;
+  UINTN   Index;
+  UINTN   Out;
+  UINT16  Chars[13];
+  UINT16  Char;
+  UINTN   Written;
+
+  Sequence = Entry->Sequence & 0x3F;
+  if (Sequence == 0) {
+    return;
+  }
+
+  Out = (Sequence - 1) * 13;
+  if (Out + 13 > NameChars) {
+    return;
+  }
+
+  //
+  // The thirteen characters of one entry, in the order FAT stores them: five in Name1, then
+  // six in Name3, then two in Name2. Name1 is a byte array and the others are UTF-16, so the
+  // first five are assembled from bytes and the rest read straight through.
+  //
+  for (Index = 0; Index < 5; Index++) {
+    Chars[Index] = (UINT16)(Entry->Name1[Index * 2] | ((UINT16)Entry->Name1[Index * 2 + 1] << 8));
+  }
+
+  for (Index = 0; Index < 3; Index++) {
+    Chars[5 + Index] = Entry->Name2[Index];
+  }
+
+  for (Index = 0; Index < 3; Index++) {
+    Chars[8 + Index] = Entry->Name3[Index];
+  }
+
+  Chars[11] = Entry->Cluster;
+  Chars[12] = (UINT16)Entry->Tail;
+
+  //
+  // Write the characters packed together, not at their on-disk offsets.
+  //
+  // mkfs.vfat stores a twelve-character name as eleven characters and the twelfth at offset
+  // 28, leaving a zero at offset 26 - "kernel.macho" is written that way. Placing each
+  // character at its own offset left the name as "kernel.mach" followed by a hole, which
+  // matched nothing; the walk went on to the next entry, which happened to be the loader, and
+  // the caller rejected it as the wrong size.
+  //
+  Written = 0;
+  for (Index = 0; Index < 13; Index++) {
+    Char = Chars[Index];
+    if (Char == 0xFFFF) {
+      break;
+    }
+
+    if (Char == 0) {
+      continue;
+    }
+
+    Name[Out + Written++] = (CHAR16)Char;
+  }
+
+  Name[Out + Written] = 0;
+}
+
+//
+// Case-insensitive comparison of a stored long name with what the caller asked for.
+//
+STATIC
+BOOLEAN
+LongNameMatches (
+  IN CONST CHAR16  *Stored,
+  IN CONST CHAR16  *Wanted
+  )
+{
+  UINTN  Index;
+  CHAR16 A;
+  CHAR16 B;
+
+  for (Index = 0; ; Index++) {
+    A = Stored[Index];
+    B = Wanted[Index];
+
+    if ((A >= L'a') && (A <= L'z')) {
+      A = (CHAR16)(A - L'a' + L'A');
+    }
+
+    if ((B >= L'a') && (B <= L'z')) {
+      B = (CHAR16)(B - L'a' + L'A');
+    }
+
+    if (A != B) {
+      return FALSE;
+    }
+
+    if (A == 0) {
+      return TRUE;
+    }
+  }
+}
+
+//
+// Find one entry in a directory, by name.
+//
+// Root is addressed by its first cluster; a subdirectory too. Returns the entry's cluster and
+// size, and whether it is a directory. Long names are collected as they are walked and used
+// first; the 8.3 name is the fallback for entries that have none.
+//
+STATIC
+EFI_STATUS
+FindInDirectory (
+  IN  FAT_VOLUME       *Volume,
+  IN  UINT32           DirectoryCluster,
+  IN  CONST CHAR16     *Name,
+  OUT FAT_DIR_ENTRY    *Found
+  )
+{
+  UINT32         Cluster;
+  UINT32         Offset;
+  UINT32         Index;
+  FAT_DIR_ENTRY  *Entry;
+  CHAR16         LongName[260];
+  BOOLEAN        HasLong;
+  UINTN          Piece;
+  UINTN          Pieces;
+
+  Cluster = DirectoryCluster;
+  ZeroMem (LongName, sizeof (LongName));
+  HasLong = FALSE;
+  Pieces  = 0;
+
+  while (Cluster != FAT_END_OF_CHAIN) {
+    Offset = ClusterToOffset (Volume, Cluster);
+    if ((UINT64)Offset + Volume->BytesPerCluster > Volume->Size) {
+      return EFI_VOLUME_CORRUPTED;
+    }
+
+    for (Index = 0; Index < Volume->BytesPerCluster; Index += sizeof (FAT_DIR_ENTRY)) {
+      Entry = (FAT_DIR_ENTRY *)(Volume->Base + Offset + Index);
+
+      if (Entry->Name[0] == 0x00) {
+        return EFI_NOT_FOUND;
+      }
+
+      if (Entry->Name[0] == 0xE5) {
+        continue;
+      }
+
+      if ((Entry->Attributes & FAT_ATTRIBUTE_LFN) == FAT_ATTRIBUTE_LFN) {
+        AssembleLongName ((FAT_LFN_ENTRY *)Entry, LongName, ARRAY_SIZE (LongName));
+        HasLong = TRUE;
+        continue;
+      }
+
+      if ((Entry->Attributes & FAT_ATTRIBUTE_VOLUME_ID) != 0) {
+        continue;
+      }
+
+      //
+      // A 0x05 in the first byte stands for 0xE5 in the name; nothing UniXNU asks for
+      // starts that way, so it is only relevant to a name comparison and handled here.
+      //
+      Piece = 0;
+      (VOID)Piece;
+
+      if (HasLong && LongNameMatches (LongName, Name)) {
+        CopyMem (Found, Entry, sizeof (*Found));
+        return EFI_SUCCESS;
+      }
+
+      if (NameMatches (Entry->Name, Name)) {
+        CopyMem (Found, Entry, sizeof (*Found));
+        return EFI_SUCCESS;
+      }
+
+      ZeroMem (LongName, sizeof (LongName));
+      HasLong = FALSE;
+      (VOID)Pieces;
+    }
+
+    Cluster = NextCluster (Volume, Cluster);
+  }
+
+  return EFI_NOT_FOUND;
+}
+
+//
+// Resolve a path against the volume, starting at the root.
+//
+// Accepts backslashes and forward slashes, leading separators, and "." components. ".." is
+// handled by restarting from the root, which is not what FAT means but is what a reader that
+// only ever walks down needs.
+//
+STATIC
+EFI_STATUS
+LookupPath (
+  IN  FAT_VOLUME        *Volume,
+  IN  CONST CHAR16      *Path,
+  OUT SHENG_FAT_OBJECT  *Object
+  )
+{
+  //
+  // Long enough for a 255-character name: FAT allows names far longer than 8.3, and a buffer
+  // of thirteen silently truncated "DarwinBoot.efi" to "DarwinBoot.ef" - which then matched
+  // nothing. "unixnu.toml" is eleven characters and happened to fit, which is why the
+  // configuration file was found and the driver beside it was not.
+  //
+  CHAR16         Component[SHENG_FAT_MAX_PATH];
+  UINTN          Length;
+  UINTN          Index;
+  UINT32         Cluster;
+  FAT_DIR_ENTRY  Entry;
+  EFI_STATUS     Status;
+
+  ZeroMem (Object, sizeof (*Object));
+  Object->Path[0]      = L'\\';
+  Object->Path[1]      = 0;
+  Object->Attributes   = FAT_ATTRIBUTE_DIRECTORY;
+  Object->FirstCluster = Volume->RootCluster;
+  Cluster              = Volume->RootCluster;
+  Index                = 0;
+
+  while (Path[Index] != 0) {
+    if ((Path[Index] == L'\\') || (Path[Index] == L'/')) {
+      Index++;
+      continue;
+    }
+
+    //
+    // One component.
+    //
+    Length = 0;
+    while ((Path[Index] != 0) && (Path[Index] != L'\\') && (Path[Index] != L'/')) {
+      if (Length + 1 < ARRAY_SIZE (Component)) {
+        Component[Length++] = Path[Index];
+      }
+
+      Index++;
+    }
+
+    Component[Length] = 0;
+
+    if ((Length == 1) && (Component[0] == L'.')) {
+      continue;
+    }
+
+    Status = FindInDirectory (Volume, Cluster, Component, &Entry);
+
+    //
+    // Record which component was looked for and what came back. A file opened under the wrong
+    // name looks exactly like a file opened correctly until something reports its size.
+    //
+    // Its own counter, not Index: reusing the walk's own cursor left it pointing past the end
+    // of the name that was being walked, so every path after the first component was skipped.
+    //
+    {
+      UINT64  *Slot = (UINT64 *)(UINTN)ShengMemSlot;
+      UINTN   Trace;
+
+      for (Trace = 0; (Trace < 16) && (Component[Trace] != 0); Trace++) {
+        ((CHAR16 *)(UINTN)(Slot + 24))[Trace] = Component[Trace];
+      }
+
+      ((CHAR16 *)(UINTN)(Slot + 24))[Trace] = 0;
+      Slot[16] = (UINT64)Status;
+      Slot[17] = (UINT64)Entry.FileSize;
+    }
+
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    Cluster = ((UINT32)Entry.FirstClusterHigh << 16) | Entry.FirstClusterLow;
+
+    //
+    // Append to the recorded path. A directory entry with its attribute set but a zero first
+    // cluster is the volume's own root, which has no cluster of its own in FAT32.
+    //
+    if (Cluster == 0) {
+      Cluster = Volume->RootCluster;
+    }
+
+    Length = StrLen (Object->Path);
+    if (Length > 1) {
+      Object->Path[Length++] = L'\\';
+      Object->Path[Length]   = 0;
+    }
+
+    StrCatS (Object->Path, ARRAY_SIZE (Object->Path), Component);
+
+    Object->Attributes   = Entry.Attributes;
+    Object->FirstCluster = Cluster;
+    Object->FileSize     = Entry.FileSize;
+  }
+
+  Object->Position = 0;
+  return EFI_SUCCESS;
+}
+
+//
+// ---------------------------------------------------------------------------
+// EFI_FILE_PROTOCOL
+// ---------------------------------------------------------------------------
+//
+
+STATIC
+EFI_FILE_PROTOCOL *
+NewFile (
+  IN FAT_VOLUME        *Volume,
+  IN CONST SHENG_FAT_OBJECT  *Object
+  )
+{
+  FAT_FILE  *File;
+
+  File = AllocateZeroPool (sizeof (*File));
+  if (File == NULL) {
+    return NULL;
+  }
+
+  CopyMem (&File->File, &mRootTemplate, sizeof (File->File));
+  File->Volume = Volume;
+  CopyMem (&File->Object, Object, sizeof (File->Object));
+  mOpenFileCount++;
+  return &File->File;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatOpen (
+  IN     EFI_FILE_PROTOCOL  *This,
+  OUT    EFI_FILE_PROTOCOL  **NewHandle,
+  IN     CHAR16             *FileName,
+  IN     UINT64             OpenMode,
+  IN     UINT64             Attributes
+  )
+{
+  FAT_FILE           *File = (FAT_FILE *)This;
+  SHENG_FAT_OBJECT   Object;
+  EFI_FILE_PROTOCOL  *Next;
+  EFI_STATUS         Status;
+
+  (VOID)Attributes;
+
+  if ((OpenMode & ~(EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE)) != 0) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  //
+  // Read only: a caller that wants to create or write is told so here rather than later.
+  //
+  if ((OpenMode & (EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE)) != 0) {
+    return EFI_WRITE_PROTECTED;
+  }
+
+  if (FileName == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  //
+  // Anything that moves upwards starts again from the root; a reader that only walks down
+  // treats it as absent rather than resolving it.
+  //
+  if (StrStr (FileName, L"..") != NULL) {
+    return EFI_NOT_FOUND;
+  }
+
+  //
+  // Leave a trace of the last Open, where the menu can read it.
+  //
+  // LoadImage asks for a driver by device path and reports only EFI_NOT_FOUND, which does not
+  // say whether the name was wrong, the path reached this code at all, or the walk failed.
+  // Recording the name and the outcome separates those.
+  //
+  {
+    UINT64  *Slot = (UINT64 *)(UINTN)ShengMemSlot;
+    UINTN   Index;
+
+    for (Index = 0; (Index < 16) && (FileName[Index] != 0); Index++) {
+      ((CHAR16 *)(UINTN)(Slot + 20))[Index] = FileName[Index];
+    }
+
+    ((CHAR16 *)(UINTN)(Slot + 20))[Index] = 0;
+    Slot[19] = (Slot[19] & 0xFFFF0000ULL) | (Index & 0xFFFF);
+  }
+
+  Status = LookupPath (File->Volume, FileName, &Object);
+  ((UINT64 *)(UINTN)ShengMemSlot)[18] = (UINT64)Status;
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Next = NewFile (File->Volume, &Object);
+  if (Next == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  *NewHandle = Next;
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatClose (
+  IN EFI_FILE_PROTOCOL  *This
+  )
+{
+  FAT_FILE  *File = (FAT_FILE *)This;
+
+  if (mOpenFileCount != 0) {
+    mOpenFileCount--;
+  }
+
+  if ((EFI_FILE_PROTOCOL *)File != &mRootTemplate) {
+    FreePool (File);
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatDelete (
+  IN EFI_FILE_PROTOCOL  *This
+  )
+{
+  (VOID)This;
+  return EFI_WRITE_PROTECTED;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatRead (
+  IN     EFI_FILE_PROTOCOL  *This,
+  IN OUT UINTN              *BufferSize,
+  OUT    VOID               *Buffer
+  )
+{
+  FAT_FILE  *File = (FAT_FILE *)This;
+  UINT32    Cluster;
+  UINT32    Skip;
+  UINT32    Offset;
+  UINT32    Chunk;
+  UINT32    Count;
+  UINT64    Remaining;
+  UINT64    Wanted;
+  UINT8     *Out;
+  UINT32    Index;
+
+  if ((BufferSize == NULL) || (Buffer == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if ((File->Object.Attributes & FAT_ATTRIBUTE_DIRECTORY) != 0) {
+    //
+    // A read of something the walk decided was a directory. Record what it was: the name that
+    // was opened, the attribute it came back with, and its size, so the wrong entry can be
+    // identified rather than guessed at.
+    //
+    UINT64  *Slot = (UINT64 *)(UINTN)ShengMemSlot;
+
+    Slot[21] = (UINT64)File->Object.Attributes;
+    Slot[22] = (UINT64)File->Object.FileSize;
+    Slot[23] = (UINT64)File->Object.FirstCluster;
+    return EFI_UNSUPPORTED;
+  }
+
+  if (File->Object.Position >= File->Object.FileSize) {
+    *BufferSize = 0;
+    return EFI_SUCCESS;
+  }
+
+  Remaining = File->Object.FileSize - File->Object.Position;
+  Wanted    = *BufferSize;
+  if (Wanted > Remaining) {
+    Wanted = Remaining;
+  }
+
+  //
+  // Walk the chain to the cluster holding the current position, then copy forwards.
+  //
+  // The walk starts at the cursor when the cursor is behind the position and closer than the
+  // head of the chain is; otherwise it starts at the first cluster.
+  //
+  if ((File->CursorCluster != 0) && (File->CursorPosition <= File->Object.Position)) {
+    Cluster = File->CursorCluster;
+    Skip    = (UINT32)((File->Object.Position - File->CursorPosition) / File->Volume->BytesPerCluster);
+  } else {
+    Cluster = File->Object.FirstCluster;
+    Skip    = (UINT32)(File->Object.Position / File->Volume->BytesPerCluster);
+  }
+
+  while ((Skip != 0) && (Cluster != FAT_END_OF_CHAIN)) {
+    Cluster = NextCluster (File->Volume, Cluster);
+    Skip--;
+  }
+
+  if (Cluster == FAT_END_OF_CHAIN) {
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  Offset = (UINT32)(File->Object.Position % File->Volume->BytesPerCluster);
+  Out    = (UINT8 *)Buffer;
+
+  //
+  // A cluster at a time, not a byte at a time.
+  //
+  // The kernel is fifty-seven megabytes, and copying it one byte per loop - each iteration
+  // recomputing the cluster's offset and re-testing it against the volume size - took long
+  // enough that the screen looked frozen. CopyMem moves a whole cluster per step and the
+  // arithmetic happens once per cluster instead of once per byte.
+  //
+  // Index counts what has been copied; the remainder of a cluster is the unit here, so a
+  // partial cluster at the end is handled by taking the smaller of the two counts.
+  //
+  Index = 0;
+  while ((UINT64)Index < Wanted) {
+    if (Offset >= File->Volume->BytesPerCluster) {
+      Cluster = NextCluster (File->Volume, Cluster);
+      if (Cluster == FAT_END_OF_CHAIN) {
+        break;
+      }
+
+      Offset = 0;
+    }
+
+    Chunk = ClusterToOffset (File->Volume, Cluster) + Offset;
+    if ((UINT64)Chunk >= File->Volume->Size) {
+      break;
+    }
+
+    Count = File->Volume->BytesPerCluster - Offset;
+    if (Count > Wanted - Index) {
+      Count = (UINT32)(Wanted - Index);
+    }
+
+    if ((UINT64)Chunk + Count > File->Volume->Size) {
+      Count = (UINT32)(File->Volume->Size - Chunk);
+    }
+
+    CopyMem (Out + Index, File->Volume->Base + Chunk, Count);
+    Index  += Count;
+    Offset += Count;
+  }
+
+  //
+  // Remember the cluster this read ended on, and the file position that cluster starts at.
+  //
+  // The two have to describe the same place: the next read walks from CursorCluster a number
+  // of links computed as (Position - CursorPosition) / BytesPerCluster, so storing the position
+  // the read started at together with the cluster it ended on skips a whole piece of the file
+  // on every call. That is what "Volume Corrupt" at 40 MiB was: the walk ran past the end of
+  // the chain because it had been told the wrong place to start.
+  //
+  if (Index != 0) {
+    File->CursorCluster  = Cluster;
+    File->CursorPosition = File->Object.Position + Index - Offset;
+  }
+
+  *BufferSize            = Index;
+  File->Object.Position += Index;
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatWrite (
+  IN     EFI_FILE_PROTOCOL  *This,
+  IN OUT UINTN              *BufferSize,
+  IN     VOID               *Buffer
+  )
+{
+  (VOID)This;
+  (VOID)BufferSize;
+  (VOID)Buffer;
+  return EFI_WRITE_PROTECTED;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatGetPosition (
+  IN  EFI_FILE_PROTOCOL  *This,
+  OUT UINT64             *Position
+  )
+{
+  FAT_FILE  *File = (FAT_FILE *)This;
+
+  if (Position == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *Position = File->Object.Position;
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatSetPosition (
+  IN EFI_FILE_PROTOCOL  *This,
+  IN UINT64             Position
+  )
+{
+  FAT_FILE  *File = (FAT_FILE *)This;
+
+  File->Object.Position = Position;
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatGetInfo (
+  IN     EFI_FILE_PROTOCOL  *This,
+  IN     EFI_GUID           *InformationType,
+  IN OUT UINTN              *BufferSize,
+  OUT    VOID               *Buffer
+  )
+{
+  FAT_FILE         *File = (FAT_FILE *)This;
+  EFI_FILE_INFO    *Info;
+  UINTN            Needed;
+  UINTN            NameChars;
+
+  if ((InformationType == NULL) || (BufferSize == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (CompareGuid (InformationType, &gEfiFileInfoGuid)) {
+    ((UINT64 *)(UINTN)ShengMemSlot)[24] = 1;
+    NameChars = StrLen (File->Object.Path) + 1;
+    ((UINT64 *)(UINTN)ShengMemSlot)[25] = (UINT64)NameChars;
+    Needed    = SIZE_OF_EFI_FILE_INFO + NameChars * sizeof (CHAR16);
+    ((UINT64 *)(UINTN)ShengMemSlot)[26] = (UINT64)Needed;
+    ((UINT64 *)(UINTN)ShengMemSlot)[27] = (UINT64)*BufferSize;
+
+    if (*BufferSize < Needed) {
+      *BufferSize = Needed;
+      return EFI_BUFFER_TOO_SMALL;
+    }
+
+    ((UINT64 *)(UINTN)ShengMemSlot)[28] = 2;
+
+    if (Buffer == NULL) {
+      return EFI_INVALID_PARAMETER;
+    }
+
+    Info = (EFI_FILE_INFO *)Buffer;
+    ZeroMem (Info, Needed);
+    Info->Size     = Needed;
+    Info->Attribute = ((File->Object.Attributes & FAT_ATTRIBUTE_DIRECTORY) != 0)
+                      ? EFI_FILE_DIRECTORY
+                      : 0;
+    Info->FileSize = File->Object.FileSize;
+    Info->PhysicalSize = File->Object.FileSize;
+    //
+    // A plain copy, not StrCpyS.
+    //
+    // The length is already known and the destination was sized from it, so the safety checks
+    // the safe-string helper performs add nothing - and on this build the call does not come
+    // back, which is why reading the kernel stopped at "getinfo" with no error.
+    //
+    if (NameChars > 0) {
+      CopyMem (Info->FileName, File->Object.Path, NameChars * sizeof (CHAR16));
+    }
+
+    //
+    // What this reader told its caller about the file it just opened: the size and the
+    // attribute are the two values a loader checks before reading, and a wrong pair here -
+    // a size of zero in particular - makes it refuse without ever touching the cluster chain.
+    //
+    ((UINT64 *)(UINTN)ShengMemSlot)[14] = (UINT64)Info->FileSize;
+    ((UINT64 *)(UINTN)ShengMemSlot)[15] = (UINT64)Info->Attribute;
+
+    *BufferSize = Needed;
+    return EFI_SUCCESS;
+  }
+
+  if (CompareGuid (InformationType, &gEfiFileSystemInfoGuid)) {
+    EFI_FILE_SYSTEM_INFO  *VolumeInfo;
+
+    Needed = SIZE_OF_EFI_FILE_SYSTEM_INFO + 12 * sizeof (CHAR16);
+
+    if (*BufferSize < Needed) {
+      *BufferSize = Needed;
+      return EFI_BUFFER_TOO_SMALL;
+    }
+
+    if (Buffer == NULL) {
+      return EFI_INVALID_PARAMETER;
+    }
+
+    VolumeInfo              = (EFI_FILE_SYSTEM_INFO *)Buffer;
+    ZeroMem (VolumeInfo, Needed);
+    VolumeInfo->Size        = Needed;
+    VolumeInfo->ReadOnly    = TRUE;
+    VolumeInfo->VolumeSize  = File->Volume->Size;
+    VolumeInfo->FreeSpace   = 0;
+    VolumeInfo->BlockSize   = File->Volume->BytesPerCluster;
+    StrCpyS (VolumeInfo->VolumeLabel, 12, L"UNIXNU-GAU");
+
+    *BufferSize = Needed;
+    return EFI_SUCCESS;
+  }
+
+  return EFI_UNSUPPORTED;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatSetInfo (
+  IN EFI_FILE_PROTOCOL  *This,
+  IN EFI_GUID           *InformationType,
+  IN UINTN              BufferSize,
+  IN VOID               *Buffer
+  )
+{
+  (VOID)This;
+  (VOID)InformationType;
+  (VOID)BufferSize;
+  (VOID)Buffer;
+  return EFI_WRITE_PROTECTED;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatFlush (
+  IN EFI_FILE_PROTOCOL  *This
+  )
+{
+  (VOID)This;
+  return EFI_SUCCESS;
+}
+
+//
+// ---------------------------------------------------------------------------
+// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
+// ---------------------------------------------------------------------------
+//
+
+STATIC
+EFI_STATUS
+EFIAPI
+FatOpenVolume (
+  IN  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *This,
+  OUT EFI_FILE_PROTOCOL                **Root
+  )
+{
+  FAT_VOLUME        *Volume;
+  SHENG_FAT_OBJECT  Object;
+  EFI_FILE_PROTOCOL *File;
+
+  Volume = BASE_CR (This, FAT_VOLUME, SimpleFileSystem);
+
+  ZeroMem (&Object, sizeof (Object));
+  Object.Path[0]      = L'\\';
+  Object.Path[1]      = 0;
+  Object.Attributes   = FAT_ATTRIBUTE_DIRECTORY;
+  Object.FirstCluster = Volume->RootCluster;
+
+  File = NewFile (Volume, &Object);
+  if (File == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  *Root = File;
+  return EFI_SUCCESS;
+}
+
+//
+// ---------------------------------------------------------------------------
+// Mount
+// ---------------------------------------------------------------------------
+//
+
+/**
+  Mount a FAT32 image held in memory and publish it as a filesystem.
+
+  @param[in]  Base      First byte of the image.
+  @param[in]  Size      Its size in bytes.
+  @param[in]  VolumeOut Receives the volume on success.
+
+  @retval EFI_SUCCESS           The image is FAT32 and the volume is parsed.
+  @retval EFI_VOLUME_CORRUPTED  The image is not a FAT32 volume this reader understands.
+**/
+EFI_STATUS
+EFIAPI
+ShengFatMount (
+  IN  UINT8        *Base,
+  IN  UINT64       Size,
+  OUT FAT_VOLUME   **VolumeOut
+  )
+{
+  FAT_BOOT_SECTOR  *Boot;
+  FAT_VOLUME       *Volume;
+  UINT32           ReservedSectors;
+  UINT32           FatSectors;
+  UINT32           DataSectors;
+  UINT32           Clusters;
+
+  if ((Base == NULL) || (Size < sizeof (FAT_BOOT_SECTOR))) {
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  Boot = (FAT_BOOT_SECTOR *)Base;
+
+  //
+  // The boot sector ends with 0x55 0xAA. The struct above stops short of it on purpose: the
+  // signature sits at offset 510 and the struct is the meaningful 64 bytes of the header.
+  //
+  {
+    UINT16  Signature;
+
+    CopyMem (&Signature, Base + 510, sizeof (Signature));
+    if (Signature != 0xAA55) {
+      return EFI_VOLUME_CORRUPTED;
+    }
+  }
+
+  if ((Boot->BytesPerSector != 512) && (Boot->BytesPerSector != 1024) &&
+      (Boot->BytesPerSector != 2048) && (Boot->BytesPerSector != 4096))
+  {
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  if (Boot->SectorsPerCluster == 0) {
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  //
+  // FAT32 is the variant with a 32-bit FAT size and a root cluster; FAT12/16 keep the root
+  // directory in a fixed area and are not what this platform writes.
+  //
+  if ((Boot->FatSize32 == 0) || (Boot->RootCluster < 2)) {
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  ReservedSectors = Boot->ReservedSectors;
+  FatSectors      = Boot->FatSize32;
+
+  Volume = AllocateZeroPool (sizeof (*Volume));
+  if (Volume == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  Volume->Base            = Base;
+  Volume->Size            = Size;
+  Volume->BytesPerCluster = (UINT32)Boot->BytesPerSector * Boot->SectorsPerCluster;
+  Volume->FatOffset       = ReservedSectors * Boot->BytesPerSector;
+  Volume->RootCluster     = Boot->RootCluster;
+  Volume->DataOffset      = (ReservedSectors + Boot->NumberOfFats * FatSectors) * Boot->BytesPerSector;
+
+  if (Volume->DataOffset >= Size) {
+    FreePool (Volume);
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  DataSectors     = (UINT32)((Size - Volume->DataOffset) / Boot->BytesPerSector);
+  Clusters        = DataSectors / Boot->SectorsPerCluster;
+  Volume->MaxCluster = Clusters + 2;
+
+  if ((Volume->MaxCluster <= 2) || (Volume->RootCluster >= Volume->MaxCluster)) {
+    FreePool (Volume);
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  CopyMem (&Volume->SimpleFileSystem, &mSimpleFileSystemTemplate, sizeof (Volume->SimpleFileSystem));
+
+  *VolumeOut = Volume;
+  return EFI_SUCCESS;
+}
+
+/**
+  Mount the image and publish it as a filesystem, as one call.
+
+  ShengBootMemoryDxe publishes the ramdisk and calls this; the volume is handed to the
+  firmware as EFI_SIMPLE_FILE_SYSTEM_PROTOCOL on the same handle, so anything looking for a
+  filesystem - UniXNU does - finds it exactly where the block device is.
+
+  @param[in]  Base      First byte of the FAT32 image.
+  @param[in]  Size      Its size in bytes.
+  @param[in]  Handle    Handle to attach the filesystem to.
+  @param[in]  DevicePath The handle's device path, kept for the volume record.
+
+  @retval EFI_SUCCESS  The volume is published.
+**/
+EFI_STATUS
+EFIAPI
+ShengFatPublish (
+  IN UINT8                     *Base,
+  IN UINT64                    Size,
+  IN EFI_HANDLE                Handle,
+  IN EFI_DEVICE_PATH_PROTOCOL  *DevicePath
+  )
+{
+  FAT_VOLUME  *Volume;
+  EFI_STATUS  Status;
+
+  Status = ShengFatMount (Base, Size, &Volume);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "SHENGFAT: not a FAT32 volume (%r)\n", Status));
+    return Status;
+  }
+
+  Volume->DeviceHandle = Handle;
+  Volume->DevicePath   = DevicePath;
+
+  Status = gBS->InstallMultipleProtocolInterfaces (
+                  &Handle,
+                  &gEfiSimpleFileSystemProtocolGuid,
+                  &Volume->SimpleFileSystem,
+                  NULL
+                  );
+  DEBUG ((
+    DEBUG_ERROR,
+    "SHENGFAT: %u byte clusters, root cluster %u, %u file reports %r\n",
+    Volume->BytesPerCluster,
+    Volume->RootCluster,
+    mOpenFileCount,
+    Status
+    ));
+
+  return Status;
+}
+
 STATIC
 VOID
 PublishRamdisk (
@@ -425,6 +1724,109 @@ PublishRamdisk (
                   NULL
                   );
   DEBUG ((DEBUG_ERROR, "SHENGMEM: ramdisk block device 0x%lx size 0x%lx %r\n", Start, End - Start, Status));
+
+  //
+  // Ask for the filesystem now, while the firmware still owns the machine.
+  //
+  // Fat is listed in APRIORI right after this driver and still ends up in the dispatcher's
+  // "left over" list, so nothing ever mounts the ramdisk and UniXNU reports one block device
+  // and no filesystems. Connecting here does not depend on the dispatcher reaching Fat: the
+  // handle exists at this point, and the binding is what Fat does when handed one.
+  //
+  // Non-recursive on purpose - the children of a ramdisk this driver synthesised are not a
+  // tree the dispatcher can walk.
+  //
+  if (!EFI_ERROR (Status)) {
+    //
+    // Mount the volume here, in this driver, with a reader of our own.
+    //
+    // FatPkg is packed and never dispatched on this board: DiskIo and UnicodeCollation2 never
+    // appear, so Fat's dependency expression never becomes true and a published ramdisk is
+    // left with no filesystem on it. Every attempt to reach Fat - ConnectController from here,
+    // ConnectController from the menu, explicit depex - ended the same way, with one block
+    // device and zero filesystems.
+    //
+    // ShengFatReadDxe parses FAT32 out of these same bytes and installs
+    // EFI_SIMPLE_FILE_SYSTEM_PROTOCOL on this handle. Nothing has to be dispatched for it.
+    //
+    Status = ShengFatPublish (mRamBase, End - Start, Handle, (EFI_DEVICE_PATH_PROTOCOL *)&mDevicePath);
+    ((UINT64 *)(UINTN)ShengMemSlot)[6] = (UINT64)Status;
+
+    //
+    // Install the device tree as a configuration table.
+    //
+    // The boot image carries one, and UniXNU looks for it there when an entry asks for the
+    // "firmware" tree. Without it, starting such an entry ends with EFI_NOT_FOUND before the
+    // kernel is touched at all - which is exactly what the menu reported for a payload it had
+    // otherwise read correctly.
+    //
+    // It travels inside the kernel blob, after the ramdisk: the bootloader keeps no copy of the
+    // boot image, so the decompressed kernel is the only place the tree reaches memory. The
+    // ramdisk's own size says where it starts, and the tree's header says how long it is.
+    //
+    {
+      UINT64          DtbAddress;
+      UINT32          Magic;
+      UINT32          TotalSize;
+      EFI_STATUS      Table;
+
+      DtbAddress = Start + (UINT64)((mMedia.LastBlock + 1) * RAM_BLOCK_SIZE);
+      Magic      = *(UINT32 *)(UINTN)DtbAddress;
+
+      if (Magic == FDT_MAGIC) {
+        TotalSize = *(UINT32 *)(UINTN)(DtbAddress + 4);
+
+        Table = gBS->InstallConfigurationTable (
+                       &gFdtTableGuid,
+                       (VOID *)(UINTN)DtbAddress
+                       );
+        ((UINT64 *)(UINTN)ShengMemSlot)[12] = (UINT64)Table;
+        ((UINT64 *)(UINTN)ShengMemSlot)[13] = TotalSize;
+        DEBUG ((DEBUG_ERROR, "SHENGMEM: device tree at 0x%lx, %u bytes, table %r\n", DtbAddress, TotalSize, Table));
+      } else {
+        ((UINT64 *)(UINTN)ShengMemSlot)[12] = 0xFDFDFDFD;
+        DEBUG ((DEBUG_ERROR, "SHENGMEM: no device tree at 0x%lx (word 0x%x)\n", DtbAddress, Magic));
+      }
+    }
+
+    //
+    // Look for the configuration file right here, through the same code the menu will use.
+    //
+    // A volume that mounts and yields no entries has two possible causes - names that do not
+    // match, or a walk that does not work - and they look identical from the menu. Finding the
+    // file from the publisher separates them and leaves the answer where the menu can show it.
+    //
+    {
+      FAT_VOLUME       *Volume;
+      SHENG_FAT_OBJECT  Object;
+      EFI_STATUS        Lookup;
+
+      if (!EFI_ERROR (ShengFatMount (mRamBase, End - Start, &Volume))) {
+        FAT_DIR_ENTRY  Probe;
+
+        //
+        // Each component in turn, so a failure names the step rather than the whole path.
+        //
+        Lookup = FindInDirectory (Volume, Volume->RootCluster, L"EFI", &Probe);
+        ((UINT64 *)(UINTN)ShengMemSlot)[10] = (UINT64)Lookup;
+
+        if (!EFI_ERROR (Lookup)) {
+          UINT32  Next;
+
+          Next   = ((UINT32)Probe.FirstClusterHigh << 16) | Probe.FirstClusterLow;
+          Lookup = FindInDirectory (Volume, Next, L"UniXNU", &Probe);
+          ((UINT64 *)(UINTN)ShengMemSlot)[11] = (UINT64)Lookup;
+        }
+
+        Lookup = LookupPath (Volume, L"\\EFI\\UniXNU\\unixnu.toml", &Object);
+        ((UINT64 *)(UINTN)ShengMemSlot)[7] = (UINT64)Lookup;
+        ((UINT64 *)(UINTN)ShengMemSlot)[8] = Object.FileSize;
+        FreePool (Volume);
+      } else {
+        ((UINT64 *)(UINTN)ShengMemSlot)[7] = 0xEEEE0000;
+      }
+    }
+  }
 }
 
 STATIC
@@ -540,6 +1942,26 @@ ShengBootMemoryDxeEntry (
   EFI_HOB_GUID_TYPE  *Hob;
   UINT64             Dtb;
 
+  //
+  // Publish this driver's result where nothing else writes.
+  //
+  // The Log Buffer cannot carry it: it is a ring, and by the time the menu can show its tail
+  // the dispatcher has logged another twenty drivers, so the one line that says what happened
+  // here is always gone. ShengMemSlot is the last 4 KiB of the same mapping, which nothing in
+  // the image writes to, so the record survives to be read from the menu.
+  //
+  // Layout: [0] stage, [1] x0 as the shim passed it, [2] first word of the boot image header,
+  // [3] second word, [4] ramdisk start, [5] ramdisk size, [6] status from publishing.
+  //
+  {
+    UINT64  *Slot = (UINT64 *)(UINTN)ShengMemSlot;
+
+    Slot[0] = 1;
+    Slot[1] = gSecEntryArg0Shadow;
+  }
+
+  BootScreenEvent (89, 0xABCD, 0, BootScreenKindStarted);
+
   Hob = GetFirstGuidHob (&gSiliciumEntryArgHobGuid);
   if (Hob == NULL) {
     DEBUG ((DEBUG_ERROR, "SHENGMEM: no entry argument HOB\n"));
@@ -549,92 +1971,80 @@ ShengBootMemoryDxeEntry (
   }
 
   Dtb = *(UINT64 *)GET_GUID_HOB_DATA (Hob);
+  gSecEntryArg0Shadow = Dtb;
+  ((UINT64 *)(UINTN)ShengMemSlot)[1] = Dtb;
 
   //
-  // Publish the payload from the boot image header, not from a device tree.
+  // Publish the payload from the ramdisk's own bytes, not from a device tree.
   //
-  // BootShim replaces ABL's x0 with the address it was itself loaded at, so this is the start
-  // of the boot image. Its header declares the kernel size, the ramdisk size and the page
-  // size; the ramdisk sits one page past the header plus enough pages for the kernel. Every
-  // number comes from the header the packer wrote, so nothing here is guessed.
+  // BootShim hands over the address where the kernel region ends. The kernel is the shim
+  // followed by the firmware volume in one gzip stream, so after decompression the ramdisk -
+  // which the boot image places after the kernel - should begin there.
   //
-  // This path exists because the device tree is out of reach on this board. ABL points at
-  // 0xA59FE000 and the boot image sits at 0xA2408000; both were unreadable for the same
-  // reason - neither address had a descriptor, so the MMU never mapped it, and a read faulted
-  // instead of returning. The map now describes the first 15 MiB of that gap, which is what
-  // makes the header readable at all.
+  // Whether it really does is what this reports. A FAT volume starts with 0x55 0xAA at
+  // offset 510 and "FAT" at offset 82, and the payload ramdisk is exactly that, so those bytes
+  // decide the question without any further guessing.
   //
   {
-    UINT32  *Header;
-    UINT32  KernelSize;
-    UINT32  RamdiskSize;
-    UINT32  PageSize;
-    UINT64  RamdiskStart;
+    UINT8   *Probe = (UINT8 *)(UINTN)Dtb;
+    UINT16  Signature;
+    UINT32  FatMark;
 
-    Header = (UINT32 *)(UINTN)Dtb;
+    ((UINT64 *)(UINTN)ShengMemSlot)[0] = 2;
+    ((UINT64 *)(UINTN)ShengMemSlot)[2] = *(UINT32 *)Probe;
+    ((UINT64 *)(UINTN)ShengMemSlot)[3] = *(UINT32 *)(Probe + 4);
 
-    DEBUG ((DEBUG_ERROR, "SHENGMEM: boot image at 0x%lx\n", Dtb));
-
-    if ((Header[0] != 0x4F444E41u) || (Header[1] != 0x214449u)) {
-      DEBUG ((
-        DEBUG_ERROR,
-        "SHENGMEM:   not an android header (%08x %08x), nothing to publish\n",
-        Header[0],
-        Header[1]
-        ));
-      LogBufferWriteString ("SHENGMEM: NOT-ANDROID ");
-      LogBufferWriteHex (Header[0]);
-      LogBufferWriteString (" ");
-      LogBufferWriteHex (Header[1]);
-      LogBufferWriteString ("\n");
-      //
-      // Tell the panel too. The console scrolls these lines away long before the menu is
-      // drawn, and the menu saying "0 block device(s), 0 filesystem(s)" does not say which of
-      // the exits below was taken. The strip survives the clear.
-      //
-      BootScreenEvent (91, Header[0], Header[1], BootScreenKindDone);
-      return EFI_SUCCESS;
-    }
-
-    KernelSize  = Header[2];
-    RamdiskSize = Header[4];
-    PageSize    = Header[9];
-
-    if ((PageSize < 0x200) || ((PageSize & (PageSize - 1)) != 0) || (RamdiskSize == 0)) {
-      DEBUG ((
-        DEBUG_ERROR,
-        "SHENGMEM:   header says page %u ramdisk %u, refusing\n",
-        PageSize,
-        RamdiskSize
-        ));
-      LogBufferWriteString ("SHENGMEM: BAD-SIZES ");
-      LogBufferWriteDec (PageSize);
-      LogBufferWriteString (" ");
-      LogBufferWriteDec (RamdiskSize);
-      LogBufferWriteString ("\n");
-      BootScreenEvent (92, PageSize, RamdiskSize, BootScreenKindDone);
-      return EFI_SUCCESS;
-    }
-
-    RamdiskStart = Dtb + (UINT64)PageSize * (1 + ((UINT64)KernelSize + PageSize - 1) / PageSize);
+    CopyMem (&Signature, Probe + 510, sizeof (Signature));
+    CopyMem (&FatMark, Probe + 82, sizeof (FatMark));
 
     DEBUG ((
       DEBUG_ERROR,
-      "SHENGMEM:   kernel %u ramdisk %u page %u -> ramdisk at 0x%lx\n",
-      KernelSize,
-      RamdiskSize,
-      PageSize,
-      RamdiskStart
+      "SHENGMEM: ramdisk candidate 0x%lx: %08x %08x sig %04x fat %08x\n",
+      Dtb,
+      *(UINT32 *)Probe,
+      *(UINT32 *)(Probe + 4),
+      Signature,
+      FatMark
       ));
 
-    LogBufferWriteString ("SHENGMEM: OK ramdisk at ");
-    LogBufferWriteHex (RamdiskStart);
-    LogBufferWriteString (" size ");
-    LogBufferWriteDec (RamdiskSize);
-    LogBufferWriteString ("\n");
+    //
+    // "FAT3", not "FAT1". The four bytes at offset 82 are FAT32's filesystem type string, and
+    // comparing against the wrong one rejected the volume twice while the panel was showing a
+    // perfectly good FAT32 boot sector - first word EB 58 90 4D, signature AA55.
+    //
+    if ((Signature == 0xAA55u) && (FatMark == 0x33544146u)) {
+      //
+      // The volume declares its size in the boot sector; trust that over any arithmetic here.
+      //
+      UINT32  SectorsPerCluster = Probe[13];
+      UINT32  ReservedSectors;
+      UINT32  NumberOfFats    = Probe[16];
+      UINT32  SectorsPerFat;
+      UINT32  TotalSectors;
+      UINT64  DiskSize;
 
-    PublishRamdisk (RamdiskStart, RamdiskStart + RamdiskSize);
-    BootScreenEvent (93, (UINT32)RamdiskStart, RamdiskStart + RamdiskSize, BootScreenKindDone);
+      CopyMem (&ReservedSectors, Probe + 14, 2);
+      CopyMem (&SectorsPerFat, Probe + 36, 4);
+      CopyMem (&TotalSectors, Probe + 32, 4);
+
+      DiskSize = (UINT64)TotalSectors * 512;
+      if (DiskSize == 0) {
+        DiskSize = (UINT64)SectorsPerCluster * 512 * 0;
+      }
+
+      ((UINT64 *)(UINTN)ShengMemSlot)[0] = 5;
+      ((UINT64 *)(UINTN)ShengMemSlot)[4] = Dtb;
+      ((UINT64 *)(UINTN)ShengMemSlot)[5] = DiskSize;
+
+      (VOID)NumberOfFats;
+      (VOID)SectorsPerFat;
+      (VOID)ReservedSectors;
+
+      PublishRamdisk (Dtb, Dtb + DiskSize);
+      return EFI_SUCCESS;
+    }
+
+    ((UINT64 *)(UINTN)ShengMemSlot)[0] = 3;
     return EFI_SUCCESS;
   }
 
@@ -683,3 +2093,30 @@ ShengBootMemoryDxeEntry (
   DEBUG ((DEBUG_ERROR, "SHENGMEM: PublishInitrd returned\n"));
   return EFI_SUCCESS;
 }
+
+//
+// The two protocol objects. They sit at the end of this file because their members are the
+// handlers above, and one initialiser there is clearer than a prototype for each.
+//
+STATIC EFI_FILE_PROTOCOL  mRootTemplate = {
+  EFI_FILE_PROTOCOL_REVISION,
+  FatOpen,
+  FatClose,
+  FatDelete,
+  FatRead,
+  FatWrite,
+  FatGetPosition,
+  FatSetPosition,
+  FatGetInfo,
+  FatSetInfo,
+  FatFlush,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+};
+
+STATIC EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  mSimpleFileSystemTemplate = {
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION,
+  FatOpenVolume
+};

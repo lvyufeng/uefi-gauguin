@@ -130,6 +130,10 @@ APRIORI DXE {
   INF Binaries/gauguin/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/UsbDeviceDxe/UsbDeviceDxe.inf
   INF Binaries/gauguin/QcomPkg/Drivers/UsbConfigDxe/UsbConfigDxe.inf
+  #
+  # After the USB stack: it needs the device protocol those drivers publish.
+  #
+  INF gauguinPkg/Drivers/UsbProbeDxe/UsbProbeDxe.inf
   # INF Binaries/gauguin/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf   [bisect: dropped]
   # INF Binaries/gauguin/QcomPkg/Drivers/TsensDxe/TsensDxe.inf   [bisect: dropped]
 

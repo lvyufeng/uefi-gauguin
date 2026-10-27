@@ -37,7 +37,14 @@
   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
 
   INF Binaries/gauguin/QcomPkg/Drivers/TzDxe/ScmDxeLA.inf
-  INF Binaries/gauguin/QcomPkg/Drivers/TzDxe/TzDxeLA.inf
+  #
+  # TzDxe is not in this image at all. APRIORI.inc stopped listing it long ago, but that only
+  # controls dispatch order - a driver still in this list is packed into the volume and is
+  # dispatched on its own depex, and this one parks there for good. The log read "!! waiting
+  # 4BEB1E7A" alongside the parked PlogDxe, and nothing after it in the batch ever started,
+  # which is why ShengBootMemoryDxe never published a ramdisk.
+  #
+  # INF Binaries/gauguin/QcomPkg/Drivers/TzDxe/TzDxeLA.inf
 
   INF MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
   INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
@@ -145,6 +152,7 @@
   # The iOS loader chain.
   #
   INF gauguinPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  INF gauguinPkg/Drivers/UsbProbeDxe/UsbProbeDxe.inf
   INF DarwinBootPkg/Driver/DarwinBoot.inf
 
   #
