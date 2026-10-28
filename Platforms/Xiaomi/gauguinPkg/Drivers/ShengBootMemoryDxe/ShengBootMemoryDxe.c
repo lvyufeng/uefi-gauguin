@@ -95,25 +95,12 @@ typedef struct {
   UINT32    FileSize;
 } FAT_DIR_ENTRY;
 
-//
-// One long-name entry, exactly 32 bytes like every directory entry.
-//
-// The thirteen UTF-16 characters are split three ways around the fields that are not part of
-// the name: five at Name1, then six at Name3, then two at Name2. The order is not
-// sequential in the struct, which is the part that is easy to get wrong.
-//
-//
-// One long-name entry: 32 bytes, thirteen UTF-16 characters split three ways by two fields
-// that are not part of the name.
-//
-//   0      sequence
-//   1-10   characters 0-4
-//   11-13  attributes, type, checksum
-//   14-19  characters 5-7
-//   20-25  characters 8-10
-//   26-27  the cluster field, which FAT keeps here and this reader does not need
-//   28-31  the 0xFFFF terminator
-//
+// VFAT LFN entries contain 5 + 6 + 2 UTF-16 code units: three in the first
+// group of ten bytes (five code units, little endian), six in the two groups
+// that follow (three each, packing to sixteen bits), and two in the tail dword
+// (offsets 28 and 30). Offset 26 is FirstClusterLow, required to be zero and
+// never part of the name. The entry is packed, so the first group is read as
+// bytes and the remaining groups as packed little-endian fields.
 typedef struct {
   UINT8     Sequence;
   UINT8     Name1[10];
@@ -123,7 +110,7 @@ typedef struct {
   UINT16    Name2[3];
   UINT16    Name3[3];
   UINT16    Cluster;
-  UINT32    Tail;           // character 12 in its low half, padding above
+  UINT32    Tail;           // code units 11 and 12 at offsets 28 and 30
 } FAT_LFN_ENTRY;
 
 STATIC_ASSERT (sizeof (FAT_LFN_ENTRY) == 32, "a long-name entry is one directory entry");
@@ -702,11 +689,9 @@ NameMatches (
     Wanted[Length++] = Ch;
   }
 
-  //
-  // Skip to the extension: everything after the first dot.
-  //
-  while ((Name[Index] != 0) && (Name[Index] != '.')) {
-    Index++;
+  // Do not silently truncate a long basename into an unrelated 8.3 file.
+  if ((Name[Index] != 0) && (Name[Index] != '.')) {
+    return FALSE;
   }
 
   if (Name[Index] == '.') {
@@ -716,6 +701,10 @@ NameMatches (
       Wanted[Length++] = (CHAR8)Name[Index];
       Index++;
     }
+  }
+
+  if (Name[Index] != 0) {
+    return FALSE;
   }
 
   for (Index = 0; Index < 11; Index++) {
@@ -763,9 +752,8 @@ AssembleLongName (
   UINTN   Out;
   UINT16  Chars[13];
   UINT16  Char;
-  UINTN   Written;
 
-  Sequence = Entry->Sequence & 0x3F;
+  Sequence = Entry->Sequence & 0x1F;
   if (Sequence == 0) {
     return;
   }
@@ -792,33 +780,56 @@ AssembleLongName (
     Chars[8 + Index] = Entry->Name3[Index];
   }
 
-  Chars[11] = Entry->Cluster;
-  Chars[12] = (UINT16)Entry->Tail;
+  // Tail holds both code units at byte offsets 28 and 30.
+  Chars[11] = (UINT16)Entry->Tail;
+  Chars[12] = (UINT16)(Entry->Tail >> 16);
 
-  //
-  // Write the characters packed together, not at their on-disk offsets.
-  //
-  // mkfs.vfat stores a twelve-character name as eleven characters and the twelfth at offset
-  // 28, leaving a zero at offset 26 - "kernel.macho" is written that way. Placing each
-  // character at its own offset left the name as "kernel.mach" followed by a hole, which
-  // matched nothing; the walk went on to the next entry, which happened to be the loader, and
-  // the caller rejected it as the wrong size.
-  //
-  Written = 0;
+  // Entries arrive highest ordinal first. Never terminate a lower chunk:
+  // doing so would erase the continuation already stored by the higher one.
   for (Index = 0; Index < 13; Index++) {
     Char = Chars[Index];
-    if (Char == 0xFFFF) {
-      break;
-    }
-
-    if (Char == 0) {
-      continue;
-    }
-
-    Name[Out + Written++] = (CHAR16)Char;
+    Name[Out + Index] = (CHAR16)Char;
   }
+}
 
-  Name[Out + Written] = 0;
+STATIC
+UINT8
+ShortNameChecksum (IN CONST UINT8 *Raw)
+{
+  UINT8 Sum = 0;
+  UINTN Index;
+  for (Index = 0; Index < 11; Index++) {
+    Sum = (UINT8)(((Sum & 1) << 7) + (Sum >> 1) + Raw[Index]);
+  }
+  return Sum;
+}
+
+// Validate termination/padding and the 255-code-unit VFAT limit before
+// exposing the assembled name to an unbounded string comparison.
+STATIC
+BOOLEAN
+FinishLongName (IN OUT CHAR16 *Name, IN UINTN Count)
+{
+  UINTN Index;
+  UINTN Length = Count;
+  BOOLEAN Ended = FALSE;
+  for (Index = 0; Index < Count; Index++) {
+    if (!Ended) {
+      if (Name[Index] == 0) {
+        Length = Index;
+        Ended = TRUE;
+      } else if (Name[Index] == 0xFFFF) {
+        return FALSE;
+      }
+    } else if (Name[Index] != 0xFFFF) {
+      return FALSE;
+    }
+  }
+  if ((Length == 0) || (Length > 255)) {
+    return FALSE;
+  }
+  Name[Length] = 0;
+  return TRUE;
 }
 
 //
@@ -877,17 +888,26 @@ FindInDirectory (
   UINT32         Offset;
   UINT32         Index;
   FAT_DIR_ENTRY  *Entry;
-  CHAR16         LongName[260];
+  CHAR16         LongName[261];
   BOOLEAN        HasLong;
-  UINTN          Piece;
-  UINTN          Pieces;
+  UINT8          Expected;
+  UINT8          Checksum;
+  UINTN          LongCount;
+  UINTN          Visited;
 
   Cluster = DirectoryCluster;
   ZeroMem (LongName, sizeof (LongName));
   HasLong = FALSE;
-  Pieces  = 0;
+  Expected = 0;
+  Checksum = 0;
+  LongCount = 0;
+  Visited = 0;
 
   while (Cluster != FAT_END_OF_CHAIN) {
+    if ((Cluster < 2) || (Cluster >= Volume->MaxCluster) ||
+        (++Visited > Volume->MaxCluster)) {
+      return EFI_VOLUME_CORRUPTED;
+    }
     Offset = ClusterToOffset (Volume, Cluster);
     if ((UINT64)Offset + Volume->BytesPerCluster > Volume->Size) {
       return EFI_VOLUME_CORRUPTED;
@@ -901,27 +921,40 @@ FindInDirectory (
       }
 
       if (Entry->Name[0] == 0xE5) {
+        HasLong = FALSE;
         continue;
       }
 
-      if ((Entry->Attributes & FAT_ATTRIBUTE_LFN) == FAT_ATTRIBUTE_LFN) {
-        AssembleLongName ((FAT_LFN_ENTRY *)Entry, LongName, ARRAY_SIZE (LongName));
-        HasLong = TRUE;
+      if (Entry->Attributes == FAT_ATTRIBUTE_LFN) {
+        FAT_LFN_ENTRY *Lfn = (FAT_LFN_ENTRY *)Entry;
+        UINT8 Ordinal = Lfn->Sequence & 0x1F;
+        if ((Lfn->Sequence & 0x40) != 0) {
+          ZeroMem (LongName, sizeof (LongName));
+          HasLong = TRUE;
+          Expected = Ordinal;
+          Checksum = Lfn->Checksum;
+          LongCount = (UINTN)Ordinal * 13;
+        }
+        if (!HasLong || (Ordinal == 0) || (Ordinal > 20) ||
+            ((Lfn->Sequence & 0xA0) != 0) || (Ordinal != Expected) ||
+            (Lfn->Type != 0) || (Lfn->Cluster != 0) ||
+            (Lfn->Checksum != Checksum)) {
+          HasLong = FALSE;
+          continue;
+        }
+        AssembleLongName (Lfn, LongName, ARRAY_SIZE (LongName));
+        Expected--;
         continue;
       }
 
       if ((Entry->Attributes & FAT_ATTRIBUTE_VOLUME_ID) != 0) {
+        HasLong = FALSE;
         continue;
       }
 
-      //
-      // A 0x05 in the first byte stands for 0xE5 in the name; nothing UniXNU asks for
-      // starts that way, so it is only relevant to a name comparison and handled here.
-      //
-      Piece = 0;
-      (VOID)Piece;
-
-      if (HasLong && LongNameMatches (LongName, Name)) {
+      if (HasLong && (Expected == 0) &&
+          (ShortNameChecksum (Entry->Name) == Checksum) &&
+          FinishLongName (LongName, LongCount) && LongNameMatches (LongName, Name)) {
         CopyMem (Found, Entry, sizeof (*Found));
         return EFI_SUCCESS;
       }
@@ -933,7 +966,6 @@ FindInDirectory (
 
       ZeroMem (LongName, sizeof (LongName));
       HasLong = FALSE;
-      (VOID)Pieces;
     }
 
     Cluster = NextCluster (Volume, Cluster);
